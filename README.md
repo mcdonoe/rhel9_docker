@@ -19,9 +19,10 @@ docker run -it --rm -v "$HOME/GIT_REPOS:/workspace" rhel9-dev bash
 ```
 
 Container starts as root (so ad-hoc `dnf install` works like the stock
-`redhat/ubi9` image). A passwordless-sudo `dev` user also exists for
-attaching as non-root, e.g. via VS Code's Dev Containers extension
-("Attach to Running Container") or `docker exec -u dev -it <container> bash`.
+`redhat/ubi9` image). A passwordless-sudo `mcdonoe` user also exists (UID/GID
+1000, matching your host user, so bind-mounted files keep sane ownership)
+for attaching as non-root, e.g. via VS Code's Dev Containers extension
+("Attach to Running Container") or `docker exec -u mcdonoe -it <container> bash`.
 
 ## Notes
 

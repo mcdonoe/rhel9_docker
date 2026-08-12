@@ -107,11 +107,14 @@ RUN echo 'source /opt/rh/gcc-toolset-12/enable' > /etc/profile.d/00-gcc-toolset.
 RUN git config --system --add safe.directory '*'
 
 # Non-root user for anyone attaching via VS Code's Dev Containers extension
-# (docker exec / attach as this user) or interactive use with `--user dev`.
+# (docker exec / attach as this user) or interactive use with `--user mcdonoe`.
+# UID/GID 1000 matches the host mcdonoe user, so files touched through a
+# bind mount (e.g. -v ~/GIT_REPOS:/workspace) keep sane host-side ownership.
 # Default container USER stays root so `docker run -it rhel9-dev bash` keeps
 # ad-hoc `dnf install` working the same way redhat/ubi9 does out of the box.
-RUN useradd -m -G wheel -s /bin/bash dev && \
-    echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev
+RUN groupadd -g 1000 mcdonoe && \
+    useradd -m -u 1000 -g 1000 -G wheel -s /bin/bash mcdonoe && \
+    echo 'mcdonoe ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/mcdonoe
 
 WORKDIR /workspace
 CMD ["/bin/bash"]

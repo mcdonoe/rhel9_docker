@@ -1,7 +1,8 @@
 # rhel9-dev
 
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
-gcc-toolset 12 & 14, Python 3.11 & 3.12, OpenJDK 21 + Ant, uv, vim, btop.
+gcc-toolset 12 & 14, Python 3.11 & 3.12, OpenJDK 21 + Ant, uv, vim, btop,
+plus an opt-in dnsmasq DHCP server (see below).
 
 ## Build
 
@@ -44,6 +45,44 @@ for attaching as non-root, e.g. via VS Code's Dev Containers extension
   full IntelliSense/extensions without baking anything into the image.
 - Rebuilding after adding a package: edit the `dnf install` list in
   `Dockerfile`, then `./build.sh` again.
+
+## DHCP server (dnsmasq)
+
+`dnsmasq` is installed in the image but not started by default — the
+container's normal `CMD` is still an interactive `bash` shell. DHCP is
+opt-in via how you invoke `docker run`.
+
+**Setup:**
+
+```
+cp dnsmasq/dhcp.conf.example dnsmasq/dhcp.conf
+```
+
+Edit `dnsmasq/dhcp.conf` (gitignored, network-specific): set `interface` to
+the host NIC you want to serve DHCP on, and adjust the `dhcp-range` /
+`dhcp-option` lines to match that network's subnet. This box has several
+physical interfaces (`ip addr` — `eno1`, `eno2`, `ens1f0`, etc.); pick a
+dedicated/isolated one, not your main LAN uplink.
+
+**Run:**
+
+```
+./run-dhcp.sh
+```
+
+This runs the container with `--network host` (required — DHCP needs raw
+L2 broadcast access to the physical interface; Docker's default bridge
+network NATs traffic and won't pass broadcast requests through) plus
+`NET_ADMIN`/`NET_RAW`, and starts `dnsmasq` in the foreground instead of a
+shell. `docker logs` (or the foreground output) shows every DHCP
+transaction.
+
+**Before running this against a real network:** confirm nothing else on
+that segment is already handing out DHCP leases. Two DHCP servers
+answering the same broadcast domain race each other and can break
+connectivity for every device on it, not just this container.
+`dhcp.conf.example` sets `dhcp-authoritative`, which assumes this is the
+only DHCP server on the segment.
 
 ## Expanding the image
 

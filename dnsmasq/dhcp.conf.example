@@ -1,0 +1,41 @@
+# dnsmasq DHCP-only config template.
+#
+# Copy this file to dnsmasq/dhcp.conf (gitignored — it's network-specific,
+# not meant to be committed) and fill in the values below for the actual
+# network you're serving. dhcp.conf is bind-mounted into the container at
+# run time (see run-dhcp.sh), so the image itself stays generic and nothing
+# here needs a rebuild to change.
+#
+# Only point this at a network segment you're sure has no other DHCP
+# server. Two DHCP servers answering the same broadcast domain race each
+# other and can hand out conflicting leases, breaking every device on it.
+
+# Interface to serve DHCP on. Must be a host interface, reachable because
+# the container runs with --network host. Pick your isolated lab NIC here,
+# e.g. `ip addr` output showed candidates like eno2/ens1f0 — NOT your
+# primary LAN uplink unless you've confirmed nothing else hands out leases
+# on it.
+interface=CHANGE_ME_iface
+bind-interfaces
+except-interface=lo
+
+# This container only answers DHCP — disable dnsmasq's built-in DNS
+# resolver/cache so it doesn't also try to act as a DNS server.
+port=0
+
+# This is meant to be the only DHCP server on the segment named above;
+# skip the usual "wait and check for other DHCP servers" delay.
+dhcp-authoritative
+
+# DHCP range: start, end, lease time. Adjust to match the subnet actually
+# in use on that interface.
+dhcp-range=192.168.100.50,192.168.100.150,12h
+
+# Gateway and DNS server(s) handed out to clients. Point these at your
+# lab network's actual router/resolver (or leave unset if clients don't
+# need external routing/DNS).
+dhcp-option=option:router,192.168.100.1
+dhcp-option=option:dns-server,192.168.100.1
+
+# Log every DHCP transaction to stdout (captured by `docker logs`).
+log-dhcp

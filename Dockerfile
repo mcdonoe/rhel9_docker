@@ -8,7 +8,7 @@
 
 FROM redhat/ubi9
 
-LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14, Python 3.11/3.12, OpenJDK 21 + Ant, cmake/make, btop, vim"
+LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14, Python 3.11/3.12, OpenJDK 21 + Ant, cmake/make, btop, vim, opt-in dnsmasq DHCP server"
 
 # ---------------------------------------------------------------------------
 # Package installs.
@@ -60,6 +60,8 @@ RUN --mount=type=secret,id=rh_username \
         # --- general shell/dev utilities ---
         sudo which findutils procps-ng tar gzip unzip xz wget openssh-clients \
         glibc-langpack-en \
+        # --- DHCP server, opt-in at runtime (see dnsmasq/ + README) ---
+        dnsmasq \
     && dnf clean all; \
     if [ "$REGISTERED" = "1" ]; then \
         subscription-manager unregister; \

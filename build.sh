@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Builds the rhel9-dev image. Credentials, if used, are passed to Docker via
-# --secret (BuildKit tmpfs mount) and never touch an image layer or this
-# script's arguments/history.
+# Builds the rhel9-dev image with docker or podman. Credentials, if used, are
+# passed to the build via --secret (a tmpfs mount, supported natively by both
+# BuildKit and buildah) and never touch an image layer or this script's
+# arguments/history.
 set -euo pipefail
 
 IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
 SECRETS_DIR="$(dirname "$0")/.secrets"
+
+# Sets ENGINE (docker or podman); override with ENGINE=podman ./build.sh
+source "$(dirname "$0")/engine.sh"
 
 USE_SUBSCRIPTION=0
 if [[ "${1:-}" == "--subscription" ]]; then
@@ -35,8 +39,9 @@ if [[ "$USE_SUBSCRIPTION" -eq 1 ]]; then
     SECRET_ARGS+=(--secret "id=rh_username,src=$USER_FILE" --secret "id=rh_password,src=$PASS_FILE")
 fi
 
-DOCKER_BUILDKIT=1 docker build "${SECRET_ARGS[@]}" -t "$IMAGE_NAME" "$(dirname "$0")"
+# DOCKER_BUILDKIT is a no-op under podman and required under older docker.
+DOCKER_BUILDKIT=1 "$ENGINE" build "${SECRET_ARGS[@]}" -t "$IMAGE_NAME" "$(dirname "$0")"
 
 echo
-echo "Built image: $IMAGE_NAME"
-echo "Run it with:  docker run -it --rm -v \"\$HOME/GIT_REPOS:/workspace\" $IMAGE_NAME bash"
+echo "Built image: $IMAGE_NAME (engine: $ENGINE)"
+echo "Run it with:  $ENGINE run -it --rm -v \"\$HOME/GIT_REPOS:/workspace\" $IMAGE_NAME bash"

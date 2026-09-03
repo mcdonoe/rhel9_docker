@@ -1,14 +1,41 @@
 # syntax=docker/dockerfile:1.7
 #
 # RHEL9 (UBI9) general-purpose development environment.
+# Builds under docker or podman; see build.sh.
 # Build:  ./build.sh                     (free repos only)
 #         ./build.sh --subscription      (also registers with Red Hat during
-#                                          the build, using BuildKit secrets)
+#                                          the build, using build secrets)
 # Run:    docker run -it --rm -v "$HOME/GIT_REPOS:/workspace" rhel9-dev bash
 
 FROM redhat/ubi9
 
 LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14, Python 3.11/3.12, OpenJDK 21 + Ant, cmake/make, btop, vim, opt-in dnsmasq DHCP server"
+
+# ---------------------------------------------------------------------------
+# Container-engine neutrality (podman vs docker).
+#
+# On a subscribed RHEL host, podman bind-mounts the host's subscription
+# secrets into every container: /usr/share/containers/mounts.conf maps
+# /usr/share/rhel/secrets -> /run/secrets. That makes UBI's /etc/rhsm-host and
+# /etc/pki/entitlement-host symlinks resolve to real directories, which is
+# exactly how rhsm.config.in_container() decides it is running in a container,
+# and that flips subscription-manager into "container mode":
+#
+#   - the CLI hard-exits 78 (EX_CONFIG) on *every* subcommand, so the
+#     --subscription register below dies under `set -eux`
+#   - its dnf plugin regenerates /etc/yum.repos.d/redhat.repo from the host's
+#     entitlement certs, enabling rhel-9-for-x86_64-{baseos,appstream}-rpms
+#     with sslverifystatus=1; cdn.redhat.com serves no OCSP response, so dnf
+#     fails with curl error 91 and even the plain build dies
+#
+# Docker/BuildKit has no equivalent auto-mount, which is why this only bites
+# on podman. Dropping the two symlinks makes both engines behave identically.
+# On docker they are dangling anyway, so this is a no-op there.
+#
+# Trade-off: containers from this image can no longer borrow a RHEL host's
+# entitlements at runtime. Nothing installed below needs them.
+# ---------------------------------------------------------------------------
+RUN rm -f /etc/rhsm-host /etc/pki/entitlement-host
 
 # ---------------------------------------------------------------------------
 # Package installs.

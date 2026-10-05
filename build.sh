@@ -44,4 +44,4 @@ DOCKER_BUILDKIT=1 "$ENGINE" build "${SECRET_ARGS[@]}" -t "$IMAGE_NAME" "$(dirnam
 
 echo
 echo "Built image: $IMAGE_NAME (engine: $ENGINE)"
-echo "Run it with:  $ENGINE run -it --rm -v \"\$HOME/GIT_REPOS:/workspace\" $IMAGE_NAME bash"
+echo "Run it with:  ./run.sh   (see README: Run)"

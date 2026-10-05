@@ -11,8 +11,9 @@ plus an opt-in dnsmasq DHCP server (see below).
 | --- | --- |
 | `Dockerfile` | The image definition |
 | `build.sh` | Builds it, optionally registering with Red Hat (`--subscription`) |
+| `run.sh` | Starts a dev shell (or one command) with the flags omp_distro's build needs |
 | `run-dhcp.sh` | Runs the image as a DHCP server, and inspects a running one |
-| `engine.sh` | Shared docker/podman detection, sourced by both scripts |
+| `engine.sh` | Shared docker/podman detection, sourced by the scripts above |
 | `dnsmasq/dhcp.conf.example` | Template to copy to `dhcp.conf` (gitignored) |
 | `.secrets/` | Cached Red Hat credentials (gitignored, created on demand) |
 
@@ -41,8 +42,36 @@ runtime. Nothing in the package list needs them.
 ## Run
 
 ```
-docker run -it --rm -v "$HOME/GIT_REPOS:/workspace" rhel9-dev bash
+./run.sh                                 # login shell as mcdonoe in /workspace
+./run.sh --root                          # same, as root
+./run.sh 'cd omp_distro && ./build.sh'   # run one command and exit
 ```
+
+`run.sh` mounts `~/GIT_REPOS` at `/workspace` (override with `WORKSPACE=`)
+and adds what a bare `docker run` lacks:
+
+- **`--security-opt seccomp=unconfined`**, which **omp_distro's `build.sh`
+  needs**. Its offline smoke tests run in a private network namespace
+  (`unshare -rn`). The engines' default seccomp profiles refuse `unshare` to
+  anything without `CAP_SYS_ADMIN`, root included, so preflight fails with
+  *"an isolated unshare network namespace is unavailable"*. This adds no
+  capabilities, so it's narrower than `--cap-add SYS_ADMIN` or `--privileged`.
+- **A login shell**, so `/etc/profile.d` sets up `PATH`, `GOTOOLCHAIN`,
+  `JAVA_HOME` and gcc-toolset-12.
+- **Named volumes for the Go caches** (`rhel9-dev-gopath`,
+  `rhel9-dev-gocache`), so repeated builds skip re-downloading modules.
+  Remove them with `docker volume rm rhel9-dev-gopath rhel9-dev-gocache`.
+
+The equivalent by hand:
+
+```
+docker run -it --rm --security-opt seccomp=unconfined \
+    -v "$HOME/GIT_REPOS:/workspace" rhel9-dev bash
+```
+
+Entering the container with `su - mcdonoe` also works: the same environment
+is set in `/etc/profile.d/10-dev-env.sh` because `su -` throws away the
+image's `ENV`.
 
 `podman` is a drop-in substitute for `docker` in every command in this README.
 On RHEL, `docker` is usually the `podman-docker` shim wrapping podman anyway.

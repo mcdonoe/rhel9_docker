@@ -159,6 +159,7 @@ RUN set -eux; \
 # sum.golang.org); override with -e GOPROXY=... for an internal proxy.
 # GOPATH/GOCACHE default to ~/go and ~/.cache/go-build, writable by whichever
 # user runs the build; mount a volume there to keep module downloads warm.
+# Keep in sync with /etc/profile.d/10-dev-env.sh below (login shells).
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
     ANT_HOME=/opt/ant \
     GOTOOLCHAIN=local \
@@ -173,10 +174,25 @@ ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
 RUN echo 'source /opt/rh/gcc-toolset-12/enable' > /etc/profile.d/00-gcc-toolset.sh && \
     chmod +x /etc/profile.d/00-gcc-toolset.sh
 
-# Binaries from `go install` land in each user's own ~/go/bin.
-RUN echo 'case ":$PATH:" in *":$HOME/go/bin:"*) ;; *) PATH="$PATH:$HOME/go/bin" ;; esac' \
-        > /etc/profile.d/10-go.sh && \
-    chmod +x /etc/profile.d/10-go.sh
+# Mirror the ENV block above for login shells. `su - mcdonoe`, `bash -l` and
+# ssh start from a clean environment and rebuild PATH from login.defs, which
+# drops everything ENV set: no `go` on PATH, no GOTOOLCHAIN or JAVA_HOME.
+# Plain `docker run`/`docker exec` keep ENV and are unaffected; the PATH
+# guards keep this idempotent there. Also adds ~/go/bin, where `go install`
+# puts each user's own tools.
+RUN cat > /etc/profile.d/10-dev-env.sh <<'EOF_PROFILE'
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+export ANT_HOME=/opt/ant
+export GOTOOLCHAIN=local
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+for d in /opt/ant/bin /usr/local/go/bin; do
+    case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+done
+case ":$PATH:" in *":$HOME/go/bin:"*) ;; *) PATH="$PATH:$HOME/go/bin" ;; esac
+unset d
+export PATH
+EOF_PROFILE
 
 # Bind-mounting host repos (e.g. -v ~/GIT_REPOS:/workspace) trips git's
 # dubious-ownership check when the container UID differs from the host
@@ -191,7 +207,11 @@ RUN git config --system --add safe.directory '*'
 # ad-hoc `dnf install` working the same way redhat/ubi9 does out of the box.
 RUN groupadd -g 1000 mcdonoe && \
     useradd -m -u 1000 -g 1000 -G wheel -s /bin/bash mcdonoe && \
-    echo 'mcdonoe ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/mcdonoe
+    echo 'mcdonoe ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/mcdonoe && \
+    install -d -o mcdonoe -g mcdonoe /home/mcdonoe/go /home/mcdonoe/.cache/go-build
+# ^ Pre-create the Go cache dirs that run.sh mounts named volumes over: an
+#   empty named volume copies its ownership from the image directory it
+#   lands on, and without these it would be root-owned and unwritable.
 
 WORKDIR /workspace
 CMD ["/bin/bash"]

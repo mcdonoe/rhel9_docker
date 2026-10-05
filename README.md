@@ -1,7 +1,8 @@
 # rhel9-dev
 
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
-gcc-toolset 12 & 14, Python 3.11 & 3.12, OpenJDK 21 + Ant, uv, vim, btop,
+gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
+OpenJDK 21 + Ant, uv, vim, btop,
 plus an opt-in dnsmasq DHCP server (see below).
 
 ## Repo layout
@@ -55,14 +56,28 @@ for attaching as non-root, e.g. via VS Code's Dev Containers extension
 ## Notes
 
 - **gcc**: gcc-toolset-12 is active by default in every interactive shell.
-  Switch to 14 for the current shell with:
+  Switch to 14 or 15 for the current shell with:
   ```
-  source /opt/rh/gcc-toolset-14/enable
+  source /opt/rh/gcc-toolset-14/enable    # or gcc-toolset-15
   ```
-- **Python**: `python3.11` and `python3.12` are both installed as explicit
-  commands (no `python3` alias change) — RHEL's own tooling depends on the
-  system Python, so it's left alone. Use `python3.11 -m venv` / `python3.12 -m venv`,
-  or `uv` for project-level dependency management.
+- **Python**: `python3.11`, `python3.12` and `python3.14` are installed as
+  explicit commands (no `python3` alias change) — RHEL's own tooling depends
+  on the system Python, so it's left alone. Use `python3.X -m venv`, or `uv`
+  for project-level dependency management.
+- **Go**: the official go.dev tarball in `/usr/local/go` (checksum-pinned via
+  `GO_VERSION`/`GO_SHA256` in the Dockerfile), with `gopls` and `dlv` in
+  `/usr/local/bin`. It's there so omp_distro's `build.sh` can compile
+  `github-mcp-server` from patched source (needs Go >= 1.25.12,
+  mcdonoe/omp_distro#2). Notes:
+  - `GOTOOLCHAIN=local` is set image-wide, so a `go.mod` that wants a newer
+    Go fails loudly instead of quietly downloading a toolchain.
+  - Module downloads need outbound HTTPS to `proxy.golang.org` and
+    `sum.golang.org`. For an internal proxy, pass `-e GOPROXY=... -e GOSUMDB=...`
+    (or `GONOSUMDB`) to `run`.
+  - `GOPATH` and `GOCACHE` default to `~/go` and `~/.cache/go-build` for
+    whichever user runs the build. To keep module downloads warm across
+    `--rm` runs, mount a volume at both. `~/go/bin` is on `PATH` for
+    `go install`ed tools.
 - **Ant/Java**: Ant isn't packaged for RHEL9 or EPEL9 at all, so it's
   installed from the official Apache tarball (checksum-pinned in the
   Dockerfile) against OpenJDK 21.
@@ -312,7 +327,7 @@ RUN rpm --import https://packages.microsoft.com/keys/microsoft.asc && \
 then add the package name to the main `dnf install` list (or a new one) and
 rebuild.
 
-**Add something not packaged for RHEL9 at all** (like Ant or uv here) —
+**Add something not packaged for RHEL9 at all** (like Ant, Go or uv here) —
 follow that same pattern: a dedicated `RUN` block that `curl`s a release
 tarball or installer script, verifies a checksum if one's published, and
 drops the result under `/opt` or `/usr/local/bin`. Keep the checksum pin —

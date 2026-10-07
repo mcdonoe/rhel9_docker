@@ -9,7 +9,7 @@
 
 FROM redhat/ubi9
 
-LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant, cmake/make, btop, vim, opt-in dnsmasq DHCP server"
+LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
 
 # ---------------------------------------------------------------------------
 # Container-engine neutrality (podman vs docker).
@@ -134,7 +134,7 @@ RUN curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # https://go.dev/dl/?mode=json.
 #
 # gopls and delve go into /usr/local/bin (not a per-user GOPATH) so root and
-# mcdonoe both get them. Their module caches are thrown away afterwards so
+# every user get them. Their module caches are thrown away afterwards so
 # the layer carries binaries only; root-owned caches under /root would also
 # have nothing to do with the build user's own GOPATH/GOCACHE.
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
 RUN echo 'source /opt/rh/gcc-toolset-12/enable' > /etc/profile.d/00-gcc-toolset.sh && \
     chmod +x /etc/profile.d/00-gcc-toolset.sh
 
-# Mirror the ENV block above for login shells. `su - mcdonoe`, `bash -l` and
+# Mirror the ENV block above for login shells. `su - <user>`, `bash -l` and
 # ssh start from a clean environment and rebuild PATH from login.defs, which
 # drops everything ENV set: no `go` on PATH, no GOTOOLCHAIN or JAVA_HOME.
 # Plain `docker run`/`docker exec` keep ENV and are unaffected; the PATH
@@ -196,22 +196,56 @@ EOF_PROFILE
 
 # Bind-mounting host repos (e.g. -v ~/GIT_REPOS:/workspace) trips git's
 # dubious-ownership check when the container UID differs from the host
-# owner; this container is for personal single-user use, so trust it broadly.
+# owner; every repo under /workspace belongs to the user running it, so trust
+# them all.
 RUN git config --system --add safe.directory '*'
 
-# Non-root user for anyone attaching via VS Code's Dev Containers extension
-# (docker exec / attach as this user) or interactive use with `--user mcdonoe`.
-# UID/GID 1000 matches the host mcdonoe user, so files touched through a
-# bind mount (e.g. -v ~/GIT_REPOS:/workspace) keep sane host-side ownership.
-# Default container USER stays root so `docker run -it rhel9-dev bash` keeps
-# ad-hoc `dnf install` working the same way redhat/ubi9 does out of the box.
-RUN groupadd -g 1000 mcdonoe && \
-    useradd -m -u 1000 -g 1000 -G wheel -s /bin/bash mcdonoe && \
-    echo 'mcdonoe ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/mcdonoe && \
-    install -d -o mcdonoe -g mcdonoe /home/mcdonoe/go /home/mcdonoe/.cache/go-build
-# ^ Pre-create the Go cache dirs that run.sh mounts named volumes over: an
-#   empty named volume copies its ownership from the image directory it
-#   lands on, and without these it would be root-owned and unwritable.
+# ---------------------------------------------------------------------------
+# OMP coding agent, from an omp_distro bundle (optional).
+#
+# build.sh stages the newest ~/GIT_REPOS/omp_distro/dist/omp-portable-*.tar.gz
+# into omp-bundle/, and this step runs the bundle's own install.sh against it:
+# /opt/omp, /etc/profile.d/omp.sh, and the RouteLM URL stamped into the
+# models.yml template. With nothing staged the step is a no-op, so the image
+# still builds without omp_distro. The bundle is bind-mounted rather than
+# COPYed so the tarball never lands in a layer.
+#
+# The bundle was made for airgapped hosts, but nothing in it stops it reaching
+# the router over the container's normal network.
+# ---------------------------------------------------------------------------
+ARG ROUTELM_URL=http://192.168.1.151:11400/v1
+
+RUN --mount=type=bind,source=omp-bundle,target=/mnt/omp-bundle \
+    set -eux; \
+    set -- /mnt/omp-bundle/omp-portable-*.tar.gz; \
+    if [ ! -e "$1" ]; then echo "No OMP bundle staged; skipping OMP."; exit 0; fi; \
+    [ $# -eq 1 ] || { echo "error: more than one OMP bundle staged" >&2; exit 1; }; \
+    mkdir /tmp/omp; \
+    tar -xzf "$1" -C /tmp/omp; \
+    /tmp/omp/*/install.sh --routelm-url "$ROUTELM_URL"; \
+    rm -rf /tmp/omp
+
+# run.sh bind-mounts the host's ~/.omp. Users set it up on the host
+# (omp-user-setup, omp-mcp-setup) against the same bundle version as this
+# image, at the same /opt/omp paths, so it works here as is; re-running setup
+# would only re-apply bundle settings over their changes. Only for someone
+# who has never set up OMP anywhere, seed ~/.omp on login. Setup only warns
+# if the router is unreachable; fix it later with omp-refresh-models. Named
+# zz- so it runs after omp.sh puts omp on PATH.
+RUN cat > /etc/profile.d/zz-omp-user-setup.sh <<'EOF_PROFILE'
+if [ -x /opt/omp/bin/omp-user-setup ] && [ "$(id -u)" -ne 0 ] && [ -w "$HOME" ] \
+        && [ ! -e "$HOME/.omp/agent/models.yml" ]; then
+    echo "==> No OMP setup in ~/.omp yet; running omp-user-setup"
+    /opt/omp/bin/omp-user-setup
+fi
+EOF_PROFILE
+
+# No user is baked in. entrypoint.sh creates one at startup with the UID/GID
+# of whoever ran run.sh, so bind-mounted files keep their host ownership for
+# every user, not just one. The image's USER stays root: without run.sh's
+# HOST_* variables, `docker run -it rhel9-dev bash` is root, as in redhat/ubi9.
+COPY --chmod=755 entrypoint.sh /usr/local/sbin/entrypoint.sh
 
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/sbin/entrypoint.sh"]
 CMD ["/bin/bash"]

@@ -1,2 +1,4 @@
 .secrets/
 dnsmasq/dhcp.conf
+omp-bundle/*
+!omp-bundle/.gitkeep

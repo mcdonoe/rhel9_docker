@@ -3,6 +3,7 @@
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
 gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
 OpenJDK 21 + Ant, uv, vim, btop,
+the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
 plus an opt-in dnsmasq DHCP server (see below).
 
 ## Repo layout
@@ -11,10 +12,12 @@ plus an opt-in dnsmasq DHCP server (see below).
 | --- | --- |
 | `Dockerfile` | The image definition |
 | `build.sh` | Builds it, optionally registering with Red Hat (`--subscription`) |
-| `run.sh` | Starts a dev shell (or one command) with the flags omp_distro's build needs |
+| `run.sh` | Starts a dev shell, one command, or the OMP agent (`--omp`), as you |
+| `entrypoint.sh` | Creates the calling host user in the container and drops to it |
 | `run-dhcp.sh` | Runs the image as a DHCP server, and inspects a running one |
 | `engine.sh` | Shared docker/podman detection, sourced by the scripts above |
 | `dnsmasq/dhcp.conf.example` | Template to copy to `dhcp.conf` (gitignored) |
+| `omp-bundle/` | Where `build.sh` stages the OMP bundle for the build (contents gitignored) |
 | `.secrets/` | Cached Red Hat credentials (gitignored, created on demand) |
 
 ## Build
@@ -42,13 +45,57 @@ runtime. Nothing in the package list needs them.
 ## Run
 
 ```
-./run.sh                                 # login shell as mcdonoe in /workspace
+./run.sh                                 # login shell as you, in your repo base dir
 ./run.sh --root                          # same, as root
 ./run.sh 'cd omp_distro && ./build.sh'   # run one command and exit
+./run.sh --omp REPO                      # the OMP agent in REPO
 ```
 
-`run.sh` mounts `~/GIT_REPOS` at `/workspace` (override with `WORKSPACE=`)
-and adds what a bare `docker run` lacks:
+Anyone on the host can use it: the container runs as **whoever started it**,
+with their host UID/GID.
+
+### Users and file ownership
+
+A bind mount doesn't translate ownership. Files under your repo base
+directory carry the
+same numeric UID/GID as on the host, and the kernel checks those numbers
+against the container process's UID. So the process has to run as your
+host UID, or your edits land owned by someone else (or fail).
+
+The image has no user baked in. `run.sh` passes your `id -u`, `id -g` and
+user name to `entrypoint.sh`, which creates a matching user (home
+`/home/<you>`, passwordless `sudo`) and then drops to it. Without those
+variables, e.g. a plain `docker run -it rhel9-dev bash`, `run.sh --root` or
+`run-dhcp.sh`, the container runs as root like the stock `redhat/ubi9` image.
+
+- **Rootless podman** maps container UIDs to subordinate host UIDs, so
+  `run.sh` adds `--userns=keep-id` to keep your UID the same on both sides.
+- **Rootless docker** maps only container root to you, so there `run.sh`
+  runs as container root.
+- The `docker` group is root-equivalent on the host. For people you wouldn't
+  give root, use rootless podman instead.
+
+To attach a second shell or VS Code's Dev Containers extension ("Attach to
+Running Container"), use your own user name: `docker exec -u <you> -it
+<container> bash -l`.
+
+### Your repo base directory
+
+Your git repo base directory is chosen in this order:
+
+1. `WORKSPACE=/path/to/repos ./run.sh` if set
+2. `~/GIT_REPOS` if it exists
+3. otherwise `run.sh` asks once and saves the answer in
+   `~/.config/rhel9-dev/workspace` (edit or delete it to change)
+
+It's mounted at **the same path as on the host** (e.g. `/home/you/GIT_REPOS`),
+with `/workspace` as a symlink to it, and the container's `$HOME` is your
+host home path too. OMP keys sessions and memory by path, so this is what
+lets the container and the host share them (see [OMP](#omp-coding-agent)).
+System paths such as `/usr` or `/opt` can't be used, since mounting there
+would hide the image's own files.
+
+### What else `run.sh` adds
 
 - **`--security-opt seccomp=unconfined`**, which **omp_distro's `build.sh`
   needs**. Its offline smoke tests run in a private network namespace
@@ -56,31 +103,31 @@ and adds what a bare `docker run` lacks:
   anything without `CAP_SYS_ADMIN`, root included, so preflight fails with
   *"an isolated unshare network namespace is unavailable"*. This adds no
   capabilities, so it's narrower than `--cap-add SYS_ADMIN` or `--privileged`.
+  `--omp` leaves it off.
 - **A login shell**, so `/etc/profile.d` sets up `PATH`, `GOTOOLCHAIN`,
   `JAVA_HOME` and gcc-toolset-12.
-- **Named volumes for the Go caches** (`rhel9-dev-gopath`,
-  `rhel9-dev-gocache`), so repeated builds skip re-downloading modules.
-  Remove them with `docker volume rm rhel9-dev-gopath rhel9-dev-gocache`.
+- **Your host `~/.omp`**, bind-mounted at the same path (see
+  [OMP](#omp-coding-agent)).
+- **Per-user named volumes** for the Go caches (`rhel9-dev-<you>-gopath`,
+  `rhel9-dev-<you>-gocache`), so repeated builds skip re-downloading modules.
+  Remove yours with
+  `docker volume rm rhel9-dev-$USER-gopath rhel9-dev-$USER-gocache`.
 
 The equivalent by hand:
 
 ```
 docker run -it --rm --security-opt seccomp=unconfined \
-    -v "$HOME/GIT_REPOS:/workspace" rhel9-dev bash
+    -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) -e HOST_USER=$USER \
+    -e HOST_HOME=$HOME -e HOST_WORKSPACE=$HOME/GIT_REPOS \
+    -v "$HOME/GIT_REPOS:$HOME/GIT_REPOS" -v "$HOME/.omp:$HOME/.omp" \
+    -w "$HOME/GIT_REPOS" rhel9-dev bash -l
 ```
 
-Entering the container with `su - mcdonoe` also works: the same environment
-is set in `/etc/profile.d/10-dev-env.sh` because `su -` throws away the
-image's `ENV`.
+The environment is also set in `/etc/profile.d/10-dev-env.sh`, so `su -`
+(which throws away the image's `ENV`) gets it too.
 
 `podman` is a drop-in substitute for `docker` in every command in this README.
 On RHEL, `docker` is usually the `podman-docker` shim wrapping podman anyway.
-
-Container starts as root (so ad-hoc `dnf install` works like the stock
-`redhat/ubi9` image). A passwordless-sudo `mcdonoe` user also exists (UID/GID
-1000, matching your host user, so bind-mounted files keep sane ownership)
-for attaching as non-root, e.g. via VS Code's Dev Containers extension
-("Attach to Running Container") or `docker exec -u mcdonoe -it <container> bash`.
 
 ## Notes
 
@@ -116,6 +163,59 @@ for attaching as non-root, e.g. via VS Code's Dev Containers extension
   full IntelliSense/extensions without baking anything into the image.
 - Rebuilding after adding a package: edit the `dnf install` list in
   `Dockerfile`, then `./build.sh` again.
+
+## OMP coding agent
+
+The image can carry the [OMP](https://omp.sh) coding agent from an
+omp_distro bundle, so it runs in the container but works on your host
+repos. Using it from the container is optional: it's the same OMP, with the
+same config, as on the host, just sandboxed.
+
+```
+./run.sh 'cd omp_distro && ./build.sh'   # 1. build a bundle (lands in omp_distro/dist/)
+./build.sh                               # 2. rebuild the image with it
+./run.sh --omp rhel9_docker              # 3. run OMP in rhel9_docker
+```
+
+- **Which bundle**: `build.sh` takes the newest
+  `~/GIT_REPOS/omp_distro/dist/omp-portable-*-linux-x64.tar.gz` (point it at
+  another `dist/` with `OMP_DIST=`). Pick a specific bundle with
+  `--omp-bundle PATH`, or leave OMP out with `--no-omp`. The image is shared:
+  build it once and every user runs the same OMP. With no bundle
+  the image builds without OMP.
+- **Keep it in step with the host**: build the image from the same bundle
+  version that's installed on the hosts, and upgrade both together. The
+  container uses each user's host `~/.omp`, which points at files under
+  `/opt/omp` (native addons, skills, extensions) by bundle version, and
+  those have to exist at the same paths in the image.
+- **Your `~/.omp`**: `run.sh` bind-mounts your host `~/.omp`, so the
+  container uses the config, models, `omp-mcp-setup` identities, sessions,
+  memory and `/undo` snapshots you already have on the host. Your repos are
+  at their host paths too, so a session started on the host can be resumed
+  in the container and the other way round. Avoid running OMP on the host and
+  in the container against the same `~/.omp` at the same time.
+- **Setup**: run `omp-user-setup` and `omp-mcp-setup` on the host as usual;
+  the container doesn't re-run them. Only if `~/.omp` has never been set up
+  at all does the container run `omp-user-setup` on login.
+- **Model router**: the image's RouteLM URL (`ROUTELM_URL=http://host:port/v1
+  ./build.sh`, default `http://192.168.1.151:11400/v1`) only matters for
+  that first-time setup. Otherwise the URL in your `~/.omp/agent/models.yml`
+  is what's used, on the host and in the container alike. The container
+  reaches it over its normal network.
+- **Per repo**: `omp-bp-init` once in each repo, as the bundle's
+  `README-TEAM.md` says. It writes into the repo, so it's left to you.
+- **What the agent can reach**: your repo base directory and `~/.omp`
+  read-write (for `~/GIT_REPOS`, that includes this repo's `.secrets/`; for
+  `~/.omp`, your MCP tokens, just as on the host), the whole network, and
+  passwordless `sudo` inside the
+  container. It has no access to the rest of the host. No SSH keys or git
+  credentials are mounted, so it can commit but not push. `--omp` keeps the
+  engine's default seccomp profile, because unlike omp_distro's build, OMP
+  doesn't need `unshare`.
+
+`./run.sh --omp` with no repo starts in your repo base directory; anything after the repo
+goes to `omp` itself, e.g. `./run.sh --omp omp_distro --version`. You can also
+just run `omp` from a normal `./run.sh` shell.
 
 ## DHCP server (dnsmasq)
 

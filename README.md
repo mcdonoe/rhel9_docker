@@ -104,6 +104,12 @@ would hide the image's own files.
   *"an isolated unshare network namespace is unavailable"*. This adds no
   capabilities, so it's narrower than `--cap-add SYS_ADMIN` or `--privileged`.
   `--omp` leaves it off.
+- **`--security-opt label=disable`**, so on an SELinux host (RHEL with
+  podman) your repos and `~/.omp` are used as they are instead of being
+  relabelled. `:z` would relabel the whole repo tree on every start, and it
+  fails with `lsetxattr ... operation not permitted` on any file you don't
+  own. SELinux doesn't confine this container as a result; the user
+  namespace and seccomp still apply. Hosts without SELinux ignore it.
 - **A login shell**, so `/etc/profile.d` sets up `PATH`, `GOTOOLCHAIN`,
   `JAVA_HOME` and gcc-toolset-12.
 - **Your host `~/.omp`**, bind-mounted at the same path (see

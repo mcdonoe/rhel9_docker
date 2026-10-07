@@ -114,14 +114,21 @@ if [[ "$RUN_OMP" -eq 1 && $# -gt 0 ]]; then
     WORKDIR="$WORKSPACE/$REPO"
 fi
 
-# ":z" relabels the bind mount for SELinux (podman on an enforcing host);
-# docker ignores it elsewhere. The container always starts as root so the
-# entrypoint can create your user; it then drops to it.
+# label=disable: on an SELinux host, run this one container unconfined by
+# SELinux rather than relabel your files for it. The usual ":z" would
+# relabel everything under WORKSPACE and ~/.omp on every start: slow on a
+# big tree, it changes your host files' labels, and it fails outright on any
+# file you don't own (e.g. root-owned build output). The user namespace and
+# seccomp still apply. Hosts without SELinux ignore it.
+#
+# The container always starts as root so the entrypoint can create your
+# user; it then drops to it.
 ARGS=(
     run --rm "${TTY_ARGS[@]}"
     --hostname rhel9-dev
     --user 0
-    -v "$WORKSPACE:$WORKSPACE:z"
+    --security-opt label=disable
+    -v "$WORKSPACE:$WORKSPACE"
     -e "HOST_WORKSPACE=$WORKSPACE"
     -w "$WORKDIR"
 )
@@ -146,7 +153,7 @@ if [[ "$AS_ROOT" -eq 0 && "$(id -u)" -ne 0 ]]; then
         -e "HOST_HOME=$HOME"
         -v "rhel9-dev-$CUSER-gopath:$HOME/go"
         -v "rhel9-dev-$CUSER-gocache:$HOME/.cache/go-build"
-        -v "$HOME/.omp:$HOME/.omp:z"
+        -v "$HOME/.omp:$HOME/.omp"
     )
     # keep-id maps your host UID to the same UID inside the container; without
     # it rootless podman would map it to a subordinate UID.

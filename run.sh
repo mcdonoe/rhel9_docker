@@ -10,6 +10,10 @@
 #                              run the OMP coding agent in REPO under your
 #                              repo base directory (default: the base
 #                              directory itself), passing it ARGS
+#   ./run.sh --check           check this machine's setup for you: that the
+#                              image comes from the shared image store (if
+#                              there is one) and that a container starts
+#                              quickly as you, with working sudo
 #
 # Your repo base directory is $WORKSPACE if set, else ~/GIT_REPOS if it
 # exists, else the directory you were asked for once and that was saved in
@@ -47,11 +51,13 @@ IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
 HOST_RO_DIRS=(/opt/rcce_coe)
 WORKSPACE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/rhel9-dev/workspace"
 
+HERE="$(dirname "$(readlink -f "$0")")"
+
 # Sets ENGINE, ENGINE_ROOTLESS, ENGINE_IS_PODMAN
-source "$(dirname "$0")/engine.sh"
+source "$HERE/engine.sh"
 
 usage() {
-    sed -n '2,24p' "$0" | sed 's/^# \?//'
+    sed -n '2,28p' "$0" | sed 's/^# \?//'
 }
 
 die() {
@@ -90,10 +96,83 @@ resolve_workspace() {
     echo "Saved to $WORKSPACE_FILE; edit or delete it to change." >&2
 }
 
+# --check: is the image the shared store's copy, and does a container start
+# quickly as you? Exits non-zero if something needs fixing.
+check() {
+    local problems=0 rw ro t0 secs out kmaj kmin
+    echo "engine: $ENGINE ($([[ "$ENGINE_ROOTLESS" -eq 1 ]] && echo rootless || echo rootful))"
+    if [[ "$ENGINE_IS_PODMAN" -eq 1 ]]; then
+        local list
+        list="$("$ENGINE" images --filter "reference=$IMAGE_NAME" --format '{{.ID}} {{.ReadOnly}}')"
+        ro="$(awk '$2=="true"{print $1}' <<<"$list" | sort -u)"
+        rw="$(awk '$2!="true"{print $1}' <<<"$list" | sort -u)"
+        if [[ -z "$ro" && -z "$rw" ]]; then
+            echo "PROBLEM: no $IMAGE_NAME image found"
+            return 1
+        elif [[ -n "$ro" && -n "$rw" ]]; then
+            echo "PROBLEM: you have your own copy of $IMAGE_NAME ($rw), which hides the"
+            echo "  shared one. Remove yours with: $ENGINE rmi $rw"
+            problems=1
+        elif [[ -n "$ro" ]]; then
+            echo "ok: $IMAGE_NAME comes from the shared image store"
+        else
+            echo "note: $IMAGE_NAME is your own copy; there's no shared one visible to you."
+            echo "  If this machine has a shared store, a ~/.config/containers/storage.conf"
+            echo "  of yours may be replacing the system one (see INSTALL.md)."
+        fi
+        # Rootless native overlay (kernel 5.13+) can't remap the store's
+        # root-owned files, so podman would make you a private, re-owned copy
+        # of the whole image on first start. fuse-overlayfs remaps instead.
+        IFS=. read -r kmaj kmin _ <<<"$(uname -r)"
+        if [[ -n "$ro" && "$ENGINE_ROOTLESS" -eq 1 ]] && (( kmaj > 5 || (kmaj == 5 && kmin >= 13) )) \
+                && ! grep -q fuse-overlayfs <<<"$("$ENGINE" info --format '{{json .Store.GraphOptions}}')"; then
+            echo "PROBLEM: podman isn't using fuse-overlayfs, so it makes you a private"
+            echo "  multi-GB copy of the shared image. Set mount_program = \"/usr/bin/fuse-overlayfs\""
+            echo "  under [storage.options.overlay] in storage.conf (see INSTALL.md)."
+            problems=1
+        fi
+    else
+        "$ENGINE" image inspect "$IMAGE_NAME" >/dev/null 2>&1 \
+            || { echo "PROBLEM: no $IMAGE_NAME image found"; return 1; }
+        echo "ok: $IMAGE_NAME found"
+    fi
+
+    local args=(run --rm --user 0 --security-opt label=disable)
+    if [[ "$(id -u)" -ne 0 && ! ( "$ENGINE_ROOTLESS" -eq 1 && "$ENGINE_IS_PODMAN" -eq 0 ) ]]; then
+        args+=(-e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" -e "HOST_USER=u$(id -u)")
+        [[ "$ENGINE_ROOTLESS" -eq 1 ]] && args+=(--userns=keep-id)
+    fi
+    echo "starting a test container..."
+    t0=$SECONDS
+    if ! out="$("$ENGINE" "${args[@]}" "$IMAGE_NAME" bash -lc 'echo "uid=$(id -u)"; sudo -n true 2>/dev/null && echo sudo=ok; g++ --version | head -1' 2>&1)"; then
+        echo "PROBLEM: the container failed:"; echo "$out" | sed 's/^/  /'
+        return 1
+    fi
+    secs=$((SECONDS - t0))
+    if grep -qx "uid=$(id -u)" <<<"$out"; then
+        echo "ok: you are uid $(id -u) inside, as on the host"
+    else
+        echo "PROBLEM: wrong user inside the container:"; echo "$out" | sed 's/^/  /'; problems=1
+    fi
+    if [[ "$(id -u)" -ne 0 ]]; then
+        grep -qx sudo=ok <<<"$out" && echo "ok: sudo works inside" \
+            || { echo "PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)"; problems=1; }
+    fi
+    if (( secs > 30 )); then
+        echo "PROBLEM: the container took ${secs}s to start. Podman was probably making"
+        echo "  you a private copy of the image (see the fuse-overlayfs note in INSTALL.md)."
+        problems=1
+    else
+        echo "ok: started and stopped in ${secs}s"
+    fi
+    return "$problems"
+}
+
 AS_ROOT=0
 RUN_OMP=0
 case "${1:-}" in
     -h|--help)  usage; exit 0 ;;
+    --check)    check; exit ;;
     --root)     AS_ROOT=1; shift ;;
     --omp)      RUN_OMP=1; shift ;;
 esac

@@ -1,29 +1,36 @@
 # Installing the rhel9-dev package
 
-This package holds a prebuilt `rhel9-dev` image and the scripts that run it,
-for a machine that won't build the image itself, such as RHEL8 with podman.
-`README.md` covers what the image is and how `run.sh` behaves. These are the
-steps for getting it running on a new machine.
+This package holds a prebuilt `rhel9-dev` development image and the scripts
+that run it, for a machine that won't build the image itself, such as an
+airgapped RHEL8 host with podman. Installing it needs no network.
+`README.md` covers what the image is and how `run.sh` behaves.
 
 | File | What it is |
 | --- | --- |
+| `install-shared.sh` | Installs everything for all users (step 2) |
 | `rhel9-dev-image.tar.gz` | The image, as written by `docker save` (linux/amd64) |
-| `run.sh`, `engine.sh` | Start the container as you (see README: Run) |
-| `run-dhcp.sh`, `dnsmasq/` | The optional DHCP server (see README) |
+| `run.sh`, `engine.sh` | Start the container as you; installed as the `rhel9-dev` command |
 | `PACKAGE-INFO` | Which image and repo commit this package is |
 | `OMP-BUILD-INFO` | The OMP bundle inside the image |
 | `SHA256SUMS` | Checksums for the files above |
 
-## 1. Check the copy
+In short, as root:
 
 ```
-sha256sum -c SHA256SUMS
+tar -xf rhel9-dev-<date>.tar && cd rhel9-dev-<date>
+./install-shared.sh
 ```
 
-## 2. Prerequisites (once per machine, as root)
+then each user runs `rhel9-dev --check` once, and `rhel9-dev` from then on.
+
+## 1. Prerequisites (once per machine, as root)
 
 - **x86_64.** The image is amd64 only.
-- **podman:** `dnf install podman` (or `container-tools`).
+- **podman:** `dnf install podman` (or `container-tools`), from the host's
+  RHEL repos or install media.
+- **fuse-overlayfs, on RHEL9 or newer:** `dnf install fuse-overlayfs`. The
+  installer stops if it's needed and missing. RHEL8 doesn't need it set up
+  (see step 2 for why).
 - **Rootless podman for each user.** Each user needs entries in `/etc/subuid`
   and `/etc/subgid`. `useradd` adds them on RHEL8, but accounts from LDAP/IdM
   or older installs may have none:
@@ -33,118 +40,87 @@ sha256sum -c SHA256SUMS
   ```
   User namespaces must be enabled too: `sysctl user.max_user_namespaces`
   must be above 0.
-- **OMP on the host at the same bundle version.** The container uses each
-  user's host `~/.omp`, which points at files under `/opt/omp` by bundle
-  version. Compare the two before relying on it:
+- **OMP on the host at the same bundle version**, if users run OMP. The
+  container uses each user's host `~/.omp`, which points at files under
+  `/opt/omp` by bundle version:
   ```
   diff OMP-BUILD-INFO /opt/omp/BUILD-INFO     # no output means they match
   ```
 
-## 3. Load the image
-
-There are two ways to do this. **A shared store** (3a) keeps one copy for
-everyone. **Per user** (3b) is simpler but costs each user several GB.
-
-### 3a. One shared copy for everyone (recommended)
-
-Root loads the image into a read-only store that every user's podman reads
-from, using podman's "additional image store" feature. Each user's own
-store then holds only the small writable layer of each running container
-(deleted when it exits; `run.sh` uses `--rm`), their Go cache volumes, and
-any images they pull themselves.
-
-**Once per machine, as root:**
+## 2. Install (as root)
 
 ```
-mkdir -p /var/lib/shared-images
-podman --root /var/lib/shared-images load -i rhel9-dev-image.tar.gz
-chmod -R a+rX /var/lib/shared-images
+./install-shared.sh
 ```
 
-Then in `/etc/containers/storage.conf`, under `[storage.options]`:
+This loads the image **once** into a shared, read-only image store that
+every user's podman reads from (podman's "additional image store"). Each
+user's own storage then holds only what they create: each container's small
+writable layer (deleted on exit, since `rhel9-dev` uses `--rm`), their Go
+cache volumes, and any images they pull themselves.
+
+It prints what it changes at each step:
+
+1. Checks the package against `SHA256SUMS`.
+2. Loads the image into `/var/lib/shared-images` and makes it
+   world-readable.
+3. Labels the store for SELinux the same way as podman's own storage.
+4. Edits `/etc/containers/storage.conf`, after backing it up. It adds the
+   store to `additionalimagestores` and, on kernels newer than RHEL8's, sets
+   `mount_program = "/usr/bin/fuse-overlayfs"`.
+5. Installs the scripts to `/opt/rhel9-dev` and links
+   `/usr/local/bin/rhel9-dev` to `run.sh`.
+6. Lists users whose own `storage.conf` would hide the shared store.
+
+Options: `--store DIR`, `--prefix DIR`, `--bindir DIR`,
+`--no-fuse-overlayfs`, `--prune`, `--skip-checksums`; see `--help`.
+
+Why the store is set up this way:
+
+- **World-readable store.** Rootless podman reads the store as each user's
+  own host UID, and files owned by host root can't be overridden even by
+  root inside the container. The container's entrypoint creates your user,
+  which rewrites `/etc/passwd`, `/etc/shadow` and `/etc/group`, starting
+  from their copies in the store, and `/etc/shadow` is mode 0000 in the
+  image. If those files can't be read, the container exits at once. The
+  side effect is that `/etc/shadow` is world-readable inside the container,
+  where it holds no passwords.
+- **fuse-overlayfs** makes the store's root-owned files show up as root
+  inside a rootless container. Rootless podman on kernels 5.13 and newer
+  (RHEL9 and later) otherwise uses the kernel's own overlay, which can't
+  remap ownership, so podman makes each user a private, re-owned copy of
+  the whole image on first start. That takes minutes and several GB per
+  user, which defeats the shared store. RHEL8's kernel can't do rootless
+  overlay at all, so podman already uses fuse-overlayfs there. The setting
+  in `storage.conf` also applies to root's own podman, which is a little
+  slower through fuse-overlayfs but otherwise unaffected.
+- **Users' own `~/.config/containers/storage.conf`** replaces the system
+  file, because podman doesn't merge them. Anyone listed in step 6 must add
+  the store to `additionalimagestores` (and the same `mount_program`) in
+  theirs.
+
+## 3. Each user, once
+
+As yourself, **not** with sudo:
 
 ```
-additionalimagestores = [ "/var/lib/shared-images" ]
+rhel9-dev --check
 ```
 
-And, on RHEL9 or newer only, under `[storage.options.overlay]`:
+This checks that the image comes from the shared store and that podman is
+set up to use it without copying it. It then starts a test container to
+confirm that you have your own UID inside it, that `sudo` works, and that
+it started in seconds. It tells you exactly what to fix if not. The most
+likely fix: if you loaded a private copy of the image before, it hides the
+shared one, and `--check` prints the `podman rmi <ID>` that removes it. That
+command removes only your copy.
+
+## 4. Use it
 
 ```
-mount_program = "/usr/bin/fuse-overlayfs"
-```
-
-(`dnf install fuse-overlayfs` if it's missing.) RHEL8 already uses
-fuse-overlayfs for rootless podman, so skip that there.
-
-Why each step matters:
-
-- **`chmod -R a+rX` is required, not optional.** Rootless podman reads the
-  store's files as your own host UID, and files owned by host root can't be
-  overridden even by root inside the container. When the container starts,
-  `run.sh` creates your user, which rewrites `/etc/passwd`, `/etc/shadow`
-  and `/etc/group`. That means reading them from the store, and
-  `/etc/shadow` is mode 0000 in the image. Without the chmod, creating the
-  user fails and the container exits at once. The side effect is that
-  `/etc/shadow` is world-readable inside the container; it holds no
-  passwords. **Re-run the chmod after every load.**
-- **fuse-overlayfs** is what makes files owned by root in the store show up
-  as root inside a rootless container. Without it, newer kernels' native
-  overlay can't remap ownership. Podman then either shows those files as
-  owned by `nobody` (breaking `sudo`), or makes each user a private
-  re-owned copy of the whole image on first start. That takes minutes and
-  defeats the shared store.
-- **A user's own `~/.config/containers/storage.conf` replaces the system
-  file**; podman doesn't merge them. Anyone who has one must add the
-  `additionalimagestores` line (and `mount_program`, if it applies) there
-  too.
-
-**Once per user, as that user:** remove any private copy, which would
-otherwise hide the shared one (podman checks your own store first), then
-check:
-
-```
-podman rmi rhel9-dev 2>/dev/null; podman image prune -f
-podman images --format '{{.Repository}} {{.ReadOnly}}' | grep rhel9-dev
-                                            # should print: ... true
-/opt/rhel9-dev/run.sh 'id; sudo true && echo sudo-ok'
-                                            # your own UID, then sudo-ok
-```
-
-The first start should take seconds. If it takes minutes, podman is making
-a private copy; check `mount_program` above. `du -sh
-~/.local/share/containers` should stay well under 1 GB, plus Go caches.
-
-**Updating the shared image**, as root:
-
-```
-podman --root /var/lib/shared-images load -i rhel9-dev-image.tar.gz
-chmod -R a+rX /var/lib/shared-images
-podman --root /var/lib/shared-images image prune -f   # drops the old one
-```
-
-Users can't remove or prune images in the shared store. Prune the old image
-only when nobody has a container running from it; with `--rm` containers,
-that just means when nobody is logged into one.
-
-### 3b. Per user
-
-Each user loads their own copy into `~/.local/share/containers`:
-
-```
-podman load -i rhel9-dev-image.tar.gz
-podman images rhel9-dev                     # check it's there
-```
-
-To update, load the newer image the same way, then `podman image prune`.
-
-## 4. Run it
-
-Put this directory somewhere everyone can read (e.g. `/opt/rhel9-dev`), then
-as each user, **without sudo**:
-
-```
-/opt/rhel9-dev/run.sh                    # shell, in your repo base directory
-/opt/rhel9-dev/run.sh --omp <repo>       # the OMP agent in that repo
+rhel9-dev                     # shell, in your repo base directory
+rhel9-dev --omp <repo>        # the OMP agent in that repo
+rhel9-dev 'make -j8'          # run one command and exit
 ```
 
 The first run asks for your git repo base directory if you have no
@@ -152,18 +128,44 @@ The first run asks for your git repo base directory if you have no
 
 Notes:
 
-- **Don't use sudo.** Under sudo, `run.sh` runs as root and anything you
+- **Don't use sudo.** Under sudo, `rhel9-dev` runs as root and anything you
   create in your repos ends up owned by root. Rootless podman is what lets
   each user run it safely, without access to the rest of the machine.
-- **SELinux.** `run.sh` starts the container with
-  `--security-opt label=disable`, so it never relabels your files. Relabelling
-  (`:z`) would walk your whole repo tree on every start, change your files'
-  labels, and fail on any file you don't own. The trade-off is that SELinux
-  doesn't confine this one container; rootless podman's user namespace and
-  seccomp still do.
+- **SELinux.** The container runs with `--security-opt label=disable`, so
+  it never relabels your files. Relabelling (`:z`) would walk your whole
+  repo tree on every start, change your files' labels, and fail on any file
+  you don't own. The trade-off is that SELinux doesn't confine this one
+  container; rootless podman's user namespace and seccomp still do.
 - **"Failed to mount subscriptions" warning.** podman on a subscribed RHEL
   host tries to share the host's Red Hat subscription with every container,
   and a normal user can't read it. This is harmless; the image doesn't use it.
-- **Updating.** Load a newer package's image the way you loaded this one:
-  root updates a shared store (step 3a), or each user runs `podman load`
-  and then `podman image prune` (step 3b).
+
+## Updating
+
+Copy over a newer package and run its `install-shared.sh` the same way. It
+loads the new image under the same name, so users pick it up the next time
+they start `rhel9-dev`.
+
+The image it replaces stays in the store, with no name, until you delete
+it. Containers that are running keep using it until they exit. Once nobody
+is in a `rhel9-dev` container, delete it with:
+
+```
+/opt/rhel9-dev/install-shared.sh --prune      # from the new package dir
+```
+
+`--prune` refuses while it can see a container using the store. Users
+can't delete images from the shared store themselves.
+
+## Without the shared store
+
+On a single-user machine, or without root, a user can instead load a
+private copy (several GB in `~/.local/share/containers`) and run the
+scripts from the package directory:
+
+```
+podman load -i rhel9-dev-image.tar.gz
+./run.sh
+```
+
+To update, load the newer image the same way, then `podman image prune`.

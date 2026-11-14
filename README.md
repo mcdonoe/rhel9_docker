@@ -12,10 +12,13 @@ plus an opt-in dnsmasq DHCP server (see below).
 | --- | --- |
 | `Dockerfile` | The image definition |
 | `build.sh` | Builds it, optionally registering with Red Hat (`--subscription`) |
-| `run.sh` | Starts a dev shell, one command, or the OMP agent (`--omp`), as you |
+| `run.sh` | Starts a dev shell, one command, or the OMP agent (`--omp`), as you; `--check` checks your setup |
 | `entrypoint.sh` | Creates the calling host user in the container and drops to it |
 | `run-dhcp.sh` | Runs the image as a DHCP server, and inspects a running one |
 | `engine.sh` | Shared docker/podman detection, sourced by the scripts above |
+| `package.sh` | Packages the built image and scripts for another machine, e.g. airgapped |
+| `install-shared.sh` | Installs such a package for all users, in a shared podman image store |
+| `INSTALL-PACKAGE.md` | The package's install guide (shipped as `INSTALL.md`) |
 | `dnsmasq/dhcp.conf.example` | Template to copy to `dhcp.conf` (gitignored) |
 | `omp-bundle/` | Where `build.sh` stages the OMP bundle for the build (contents gitignored) |
 | `.secrets/` | Cached Red Hat credentials (gitignored, created on demand) |
@@ -139,6 +142,22 @@ The environment is also set in `/etc/profile.d/10-dev-env.sh`, so `su -`
 
 `podman` is a drop-in substitute for `docker` in every command in this README.
 On RHEL, `docker` is usually the `podman-docker` shim wrapping podman anyway.
+
+## Deploying to another machine (e.g. airgapped)
+
+```
+./package.sh                  # writes dist/rhel9-dev-<date>.tar
+```
+
+Copy the `.tar` to the target machine, unpack it, and as root run
+`./install-shared.sh` inside it. That loads the image once into a shared,
+read-only podman image store for every user, sets up
+`/etc/containers/storage.conf` for it, and installs the `rhel9-dev`
+command. Each user then runs `rhel9-dev --check` once. No network is
+needed. Updating is the same steps with a newer package. The package
+covers development use only; it leaves out `run-dhcp.sh`. See
+[INSTALL-PACKAGE.md](INSTALL-PACKAGE.md), which ships in the package as
+`INSTALL.md`.
 
 ## Notes
 

@@ -33,6 +33,8 @@
 #     --cap-add SYS_ADMIN or --privileged: no capabilities are added.
 #     --omp keeps the default profile: OMP doesn't need unshare, so the agent
 #     doesn't get it. It still has all of /workspace and the full network.
+#   - /opt/rcce_coe from the host, read-only at the same path (skipped if
+#     the host has none).
 #   - a login shell, so /etc/profile.d sets PATH, GOTOOLCHAIN and friends
 #     the same way `su -` would.
 #   - per-user named volumes for the Go module and build caches, so repeat
@@ -41,6 +43,8 @@
 set -euo pipefail
 
 IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
+# Host directories mounted read-only at the same path in the container.
+HOST_RO_DIRS=(/opt/rcce_coe)
 WORKSPACE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/rhel9-dev/workspace"
 
 # Sets ENGINE, ENGINE_ROOTLESS, ENGINE_IS_PODMAN
@@ -133,6 +137,17 @@ ARGS=(
     -w "$WORKDIR"
 )
 [[ "$RUN_OMP" -eq 1 ]] || ARGS+=(--security-opt seccomp=unconfined)
+
+# Host directories shared into every container, read-only, at the same path.
+# A missing one is skipped with a note, so the script still runs on hosts
+# without it.
+for d in "${HOST_RO_DIRS[@]}"; do
+    if [[ -d "$d" ]]; then
+        ARGS+=(-v "$d:$d:ro")
+    else
+        echo "note: $d not found on this host; not mounting it" >&2
+    fi
+done
 
 # Rootless docker maps container root to you and every other container UID to
 # a subordinate UID, so only root inside writes /workspace files as you.

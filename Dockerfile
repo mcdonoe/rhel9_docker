@@ -9,7 +9,7 @@
 
 FROM redhat/ubi9
 
-LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
+LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant, Boost 1.81, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
 
 # ---------------------------------------------------------------------------
 # Container-engine neutrality (podman vs docker).
@@ -77,6 +77,8 @@ RUN --mount=type=secret,id=rh_username \
         gdb \
         # --- autotools, commonly paired with cmake/make C/C++ projects ---
         autoconf automake libtool pkgconf-pkg-config \
+        # --- compression libs for Boost.Iostreams (Boost is built below) ---
+        bzip2 bzip2-devel zlib-devel xz-devel libzstd-devel \
         # --- Python ---
         python3.11 python3.11-devel python3.11-pip \
         python3.12 python3.12-devel python3.12-pip \
@@ -122,6 +124,45 @@ RUN set -eux; \
 # (in your GIT_REPOS) uses it for dependency resolution via uv.lock.
 # ---------------------------------------------------------------------------
 RUN curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# ---------------------------------------------------------------------------
+# Boost — built from the official source release, checksum pinned. RHEL9
+# only packages 1.75 (boost-devel), so it isn't installed and can't clash.
+#
+# Installed under /usr/local (headers in include/, libs in lib64/, both
+# shared and static, release + multithreaded), so gcc finds the headers with
+# no -I, ld finds the libs with no -L, CMake finds it with
+# find_package(Boost 1.81 CONFIG), and ld.so finds the .so files through
+# the ld.so.conf.d entry below. Built with gcc-toolset-12, the image's
+# default; the libraries work from gcc-toolset-14/15 too.
+#
+# Left out: Boost.Python (it would tie the build to one of the three
+# Pythons) and Boost.MPI/Graph.Parallel (no MPI in the image).
+# Bump BOOST_VERSION/BOOST_SHA256 together; the sha256 is published next to
+# each tarball as boost_X_Y_Z.tar.bz2.json.
+# ---------------------------------------------------------------------------
+ARG BOOST_VERSION=1.81.0
+ARG BOOST_SHA256=71feeed900fbccca04a3b4f2f84a7c217186f28a940ed8b7ed4725986baf99fa
+
+RUN set -eux; \
+    v="${BOOST_VERSION//./_}"; \
+    curl -fsSL -o /tmp/boost.tar.bz2 \
+        "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"; \
+    echo "${BOOST_SHA256}  /tmp/boost.tar.bz2" | sha256sum -c -; \
+    tar -xjf /tmp/boost.tar.bz2 -C /tmp; \
+    rm /tmp/boost.tar.bz2; \
+    cd "/tmp/boost_${v}"; \
+    set +u; source /opt/rh/gcc-toolset-12/enable; set -u; \
+    ./bootstrap.sh --with-toolset=gcc \
+        --without-libraries=python,mpi,graph_parallel; \
+    ./b2 -j"$(nproc)" -d0 \
+        toolset=gcc variant=release threading=multi link=shared,static \
+        --prefix=/usr/local --libdir=/usr/local/lib64 install; \
+    cd /; \
+    rm -rf "/tmp/boost_${v}"; \
+    echo /usr/local/lib64 > /etc/ld.so.conf.d/usr-local-lib64.conf; \
+    ldconfig; \
+    grep -q "define BOOST_LIB_VERSION \"${v%_0}\"" /usr/local/include/boost/version.hpp
 
 # ---------------------------------------------------------------------------
 # Go — official upstream tarball into /usr/local/go, checksum pinned.

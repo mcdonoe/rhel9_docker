@@ -2,7 +2,7 @@
 
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
 gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
-OpenJDK 21 + Ant, uv, vim, btop,
+OpenJDK 21 + Ant, Boost 1.81, uv, vim, btop,
 the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
 plus an opt-in dnsmasq DHCP server (see below).
 
@@ -114,6 +114,11 @@ would hide the image's own files.
   `JAVA_HOME` and gcc-toolset-12.
 - **Your host `~/.omp`**, bind-mounted at the same path (see
   [OMP](#omp-coding-agent)).
+- **`/opt/rcce_coe`** from the host, **read-only** at the same path. If the
+  host has no `/opt/rcce_coe`, `run.sh` prints a note and starts without it.
+  Add more shared host directories to `HOST_RO_DIRS` in `run.sh`. Under
+  rootless podman, files owned by host root show up as owned by `nobody`, so
+  you can only read what's world-readable on the host.
 - **Per-user named volumes** for the Go caches (`rhel9-dev-<you>-gopath`,
   `rhel9-dev-<you>-gocache`), so repeated builds skip re-downloading modules.
   Remove yours with
@@ -160,6 +165,13 @@ On RHEL, `docker` is usually the `podman-docker` shim wrapping podman anyway.
     whichever user runs the build. To keep module downloads warm across
     `--rm` runs, mount a volume at both. `~/go/bin` is on `PATH` for
     `go install`ed tools.
+- **Boost 1.81**: built from the official source release (checksum-pinned
+  via `BOOST_VERSION`/`BOOST_SHA256` in the Dockerfile) with gcc-toolset-12,
+  since RHEL9 only ships 1.75. It's in `/usr/local` (headers in `include/`,
+  shared and static libraries in `lib64/`), so `#include <boost/...>` and
+  `-lboost_<lib>` work without `-I` or `-L` flags. In CMake, use
+  `find_package(Boost 1.81 CONFIG REQUIRED COMPONENTS ...)`. Boost.Python
+  and Boost.MPI aren't built.
 - **Ant/Java**: Ant isn't packaged for RHEL9 or EPEL9 at all, so it's
   installed from the official Apache tarball (checksum-pinned in the
   Dockerfile) against OpenJDK 21.

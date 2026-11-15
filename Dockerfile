@@ -6,8 +6,76 @@
 #         ./build.sh --subscription      (also registers with Red Hat during
 #                                          the build, using build secrets)
 # Run:    docker run -it --rm -v "$HOME/GIT_REPOS:/workspace" rhel9-dev bash
+#
+# Three stages:
+#   maps     the offline map data, shared by both images below
+#   runtime  rhel9-runtime: Java 21 runtime + maps, for running a built
+#            application as a system service (./build.sh --runtime)
+#   dev      rhel9-dev: the full development environment (the default)
 
-FROM redhat/ubi9
+# ---------------------------------------------------------------------------
+# Offline maps for MapLibre, in /opt/maps:
+#   - basemaps-assets/: the fonts (glyph PBFs) and sprites that Protomaps'
+#     map styles use, pinned to one commit. Without local glyphs, map labels
+#     fail offline. The style itself comes from the vendored npm package
+#     @protomaps/basemaps.
+#   - eastern-seaboard.pmtiles: the map tiles, if ./fetch-maps.sh has put
+#     them in maps/ (they're too big for git). Otherwise this is skipped and
+#     the images build without them, as with the OMP bundle.
+# ---------------------------------------------------------------------------
+FROM docker.io/redhat/ubi9 AS maps
+
+ARG BASEMAPS_ASSETS_COMMIT=028c18f713baecad011301ff7a69acc39bcc2ae7
+ARG BASEMAPS_ASSETS_SHA256=57e40e8c512bd8042d0a3a251f19d0d1c8523ad963c666c3c6643bada4dc92d0
+
+RUN set -eux; \
+    curl -fsSL -o /tmp/assets.tar.gz \
+        "https://github.com/protomaps/basemaps-assets/archive/${BASEMAPS_ASSETS_COMMIT}.tar.gz"; \
+    echo "${BASEMAPS_ASSETS_SHA256}  /tmp/assets.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/maps/basemaps-assets; \
+    tar -xzf /tmp/assets.tar.gz -C /opt/maps/basemaps-assets --strip-components=1 \
+        --wildcards '*/fonts' '*/sprites' '*/README.md'; \
+    rm /tmp/assets.tar.gz
+
+RUN --mount=type=bind,source=maps,target=/mnt/maps \
+    set -eux; \
+    ls /mnt/maps >/dev/null || { echo "error: can't read maps/ (SELinux? build with ./build.sh)" >&2; exit 1; }; \
+    if [ -f /mnt/maps/eastern-seaboard.pmtiles ]; then \
+        cp /mnt/maps/eastern-seaboard.pmtiles /mnt/maps/eastern-seaboard.json /opt/maps/; \
+    else \
+        echo "No maps/eastern-seaboard.pmtiles staged (see fetch-maps.sh); building without map tiles."; \
+    fi; \
+    chmod -R a+rX /opt/maps
+
+# ---------------------------------------------------------------------------
+# rhel9-runtime: runs one built Java application, as a system service. The
+# application's jars stay on the host and are mounted read-only at their
+# host paths; run-app puts every jar in the folders listed in APP_CLASSPATH
+# on the classpath and starts MAIN_CLASS. install-shared.sh --app writes the
+# service. No compilers, build tools, Node or browsers: only what running
+# needs.
+# ---------------------------------------------------------------------------
+FROM docker.io/redhat/ubi9-minimal AS runtime
+
+LABEL description="RHEL9 UBI minimal runtime: OpenJDK 21 (headless) and offline map data, for running a built Java application" \
+      rhel9-dev.image=runtime
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        java-21-openjdk-headless tzdata \
+    && microdnf clean all
+
+COPY --from=maps /opt/maps /opt/maps
+COPY --chmod=755 run-app.sh /usr/local/bin/run-app
+
+# Unprivileged by default; the service can choose another user (--user).
+USER 65534:65534
+WORKDIR /tmp
+ENTRYPOINT ["/usr/local/bin/run-app"]
+
+# ---------------------------------------------------------------------------
+# rhel9-dev: the development environment. Last, so it's the default target.
+# ---------------------------------------------------------------------------
+FROM redhat/ubi9 AS dev
 
 LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium, Firefox), Boost 1.81, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
 
@@ -397,44 +465,22 @@ RUN set -eux; \
     cd /; rm -rf /tmp/selftest /tmp/selftest-store /tmp/selftest-cache /tmp/registry-port
 
 # ---------------------------------------------------------------------------
-# Offline maps for MapLibre, in /opt/maps:
-#   - pmtiles: Protomaps' CLI (inspect, serve or cut .pmtiles archives),
-#     built from pinned source with the image's Go.
-#   - basemaps-assets/: the fonts (glyph PBFs) and sprites that Protomaps'
-#     map styles use, pinned to one commit. Without local glyphs, map labels
-#     fail offline. The style itself comes from the vendored npm package
-#     @protomaps/basemaps.
-#   - eastern-seaboard.pmtiles: the map tiles, if ./fetch-maps.sh has put
-#     them in maps/ (they're too big for git). Otherwise this is skipped and
-#     the image builds without them, as with the OMP bundle.
+# Maps: the offline map data from the maps stage, in /opt/maps, plus
+# pmtiles, Protomaps' CLI (inspect, serve or cut .pmtiles archives), built
+# from pinned source with the image's Go.
 # ---------------------------------------------------------------------------
 ARG PMTILES_VERSION=v1.31.2
-ARG BASEMAPS_ASSETS_COMMIT=028c18f713baecad011301ff7a69acc39bcc2ae7
-ARG BASEMAPS_ASSETS_SHA256=57e40e8c512bd8042d0a3a251f19d0d1c8523ad963c666c3c6643bada4dc92d0
 
 RUN set -eux; \
     GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOBIN=/usr/local/bin \
         go install "github.com/protomaps/go-pmtiles@${PMTILES_VERSION}"; \
     mv /usr/local/bin/go-pmtiles /usr/local/bin/pmtiles; \
-    rm -rf /tmp/gopath /tmp/gocache; \
-    curl -fsSL -o /tmp/assets.tar.gz \
-        "https://github.com/protomaps/basemaps-assets/archive/${BASEMAPS_ASSETS_COMMIT}.tar.gz"; \
-    echo "${BASEMAPS_ASSETS_SHA256}  /tmp/assets.tar.gz" | sha256sum -c -; \
-    mkdir -p /opt/maps/basemaps-assets; \
-    tar -xzf /tmp/assets.tar.gz -C /opt/maps/basemaps-assets --strip-components=1 \
-        --wildcards '*/fonts' '*/sprites' '*/README.md'; \
-    rm /tmp/assets.tar.gz
+    rm -rf /tmp/gopath /tmp/gocache
 
-RUN --mount=type=bind,source=maps,target=/mnt/maps \
-    set -eux; \
-    ls /mnt/maps >/dev/null || { echo "error: can't read maps/ (SELinux? build with ./build.sh)" >&2; exit 1; }; \
-    if [ -f /mnt/maps/eastern-seaboard.pmtiles ]; then \
-        cp /mnt/maps/eastern-seaboard.pmtiles /mnt/maps/eastern-seaboard.json /opt/maps/; \
+COPY --from=maps /opt/maps /opt/maps
+RUN if [ -f /opt/maps/eastern-seaboard.pmtiles ]; then \
         pmtiles show /opt/maps/eastern-seaboard.pmtiles | head -20; \
-    else \
-        echo "No maps/eastern-seaboard.pmtiles staged (see fetch-maps.sh); building without map tiles."; \
-    fi; \
-    chmod -R a+rX /opt/maps
+    fi
 
 # No user is baked in. entrypoint.sh creates one at startup with the UID/GID
 # of whoever ran run.sh, so bind-mounted files keep their host ownership for

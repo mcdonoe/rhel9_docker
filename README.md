@@ -7,6 +7,9 @@ Firefox), Boost 1.81, uv, vim, btop,
 the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
 plus an opt-in dnsmasq DHCP server (see below).
 
+The same Dockerfile also builds `rhel9-runtime`, a small image for running a
+built Java application as a system service (see [Runtime image](#runtime-image)).
+
 ## Repo layout
 
 | File | Purpose |
@@ -20,6 +23,8 @@ plus an opt-in dnsmasq DHCP server (see below).
 | `package.sh` | Packages the built image and scripts for another machine, e.g. airgapped |
 | `install-shared.sh` | Installs such a package for all users, in a shared podman image store |
 | `INSTALL-PACKAGE.md` | The package's install guide (shipped as `INSTALL.md`) |
+| `run-app.sh` | The runtime image's entrypoint: starts a Java app from mounted jar folders |
+| `INSTALL-RUNTIME.md` | The runtime package's install guide (shipped as `INSTALL.md`) |
 | `dnsmasq/dhcp.conf.example` | Template to copy to `dhcp.conf` (gitignored) |
 | `omp-bundle/` | Where `build.sh` stages the OMP bundle for the build (contents gitignored) |
 | `npm-vendor/` | The vendored npm packages and the offline registry that serves them (see its README) |
@@ -34,6 +39,7 @@ plus an opt-in dnsmasq DHCP server (see below).
 ./build.sh --subscription # also registers with subscription-manager during
                            # the build (prompts for Red Hat credentials once,
                            # caches them in ./.secrets which is gitignored)
+./build.sh --runtime      # the small runtime image instead (see Runtime image)
 ```
 
 Works with either **docker** or **podman** — `build.sh` picks whichever is on
@@ -169,6 +175,44 @@ needed. Updating is the same steps with a newer package. The package
 covers development use only; it leaves out `run-dhcp.sh`. See
 [INSTALL-PACKAGE.md](INSTALL-PACKAGE.md), which ships in the package as
 `INSTALL.md`.
+
+## Runtime image
+
+`rhel9-dev` is for developing; `rhel9-runtime` is for running what you
+built. It's UBI9 minimal with a headless Java 21 runtime (the same Java as
+`rhel9-dev`) and the offline maps in `/opt/maps`, and nothing else: about
+0.8 GB against 7 GB, running as `nobody` by default.
+
+The application isn't baked in. You build its jars in `rhel9-dev`, they land
+on the host, your deployment puts them in folders (e.g.
+`/OUTPUT/web/output_libs` for the application, `/OUTPUT/web/cots_libs` for
+third-party jars), and a system service runs them in `rhel9-runtime`: it
+mounts those folders read-only at the same paths and runs
+`java -cp '<folder>/*:...' MAIN_CLASS`. A new build means new jars and a
+`systemctl restart`; the image and the service stay as they are.
+
+```
+./build.sh --runtime              # builds rhel9-runtime (shares the maps stage)
+./package.sh --runtime            # writes dist/rhel9-runtime-<date>.tar
+```
+
+On the target, as root:
+
+```
+./install-shared.sh --runtime     # loads the image into root's podman storage
+/opt/rhel9-runtime/install-shared.sh --app web-bridge \
+    --classpath /OUTPUT/web/output_libs:/OUTPUT/web/cots_libs \
+    --main com.example.bridge.BridgeApplication --start
+```
+
+`--app` writes a podman quadlet (`/etc/containers/systemd/NAME.container`,
+podman 4.4+) or, on older podman, a plain systemd unit that calls
+`podman run`. The service uses the host network, starts at boot, restarts on
+failure, and logs to the journal (`journalctl -u NAME`). Options for JVM
+flags, arguments, environment, extra read-only or writable folders and the
+user are in [INSTALL-RUNTIME.md](INSTALL-RUNTIME.md), which ships in the
+runtime package as `INSTALL.md`. `--unit-dir DIR` writes the unit somewhere
+else without touching systemd, to review it first.
 
 ## Notes
 

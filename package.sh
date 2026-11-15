@@ -2,24 +2,43 @@
 # Packages the built rhel9-dev image, plus the scripts that run it, for a
 # machine that won't build it itself (e.g. RHEL8 with podman).
 #
-#   ./package.sh [OUT_DIR]     default: dist/
+#   ./package.sh [--runtime] [OUT_DIR]     default OUT_DIR: dist/
 #
-# Writes OUT_DIR/rhel9-dev-<date>/ and a .tar of it (the image inside is
+#   --runtime   package rhel9-runtime (./build.sh --runtime) instead, for
+#               hosts that run a built application as a system service
+#
+# Writes OUT_DIR/<image>-<date>/ and a .tar of it (the image inside is
 # already compressed, so the outer tar isn't). See INSTALL.md in the package
 # for the other side.
 set -euo pipefail
 
-IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT_DIR="${1:-$HERE/dist}"
+RUNTIME=0
+OUT_DIR=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --runtime) RUNTIME=1; shift ;;
+        -*)        echo "error: unknown option: $1" >&2; exit 2 ;;
+        *)         OUT_DIR="$1"; shift ;;
+    esac
+done
+OUT_DIR="${OUT_DIR:-$HERE/dist}"
+if [[ "$RUNTIME" -eq 1 ]]; then
+    IMAGE_NAME="${IMAGE_NAME:-rhel9-runtime}"
+    BUILD_HINT="./build.sh --runtime"
+else
+    IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
+    BUILD_HINT="./build.sh"
+fi
 
 # Sets ENGINE
 source "$HERE/engine.sh"
 
 "$ENGINE" image inspect "$IMAGE_NAME" >/dev/null 2>&1 \
-    || { echo "error: no image '$IMAGE_NAME'; run ./build.sh first" >&2; exit 1; }
+    || { echo "error: no image '$IMAGE_NAME'; run $BUILD_HINT first" >&2; exit 1; }
 
-NAME="rhel9-dev-$(date +%Y%m%d)"
+NAME="$IMAGE_NAME-$(date +%Y%m%d)"
+IMAGE_TAR="$IMAGE_NAME-image.tar.gz"
 PKG="$OUT_DIR/$NAME"
 rm -rf "$PKG" "$PKG.tar"
 mkdir -p "$PKG"
@@ -29,24 +48,37 @@ GZIP_CMD=gzip
 command -v pigz >/dev/null && GZIP_CMD=pigz
 
 echo "==> Saving $IMAGE_NAME (this takes a few minutes)"
-"$ENGINE" save "$IMAGE_NAME" | "$GZIP_CMD" > "$PKG/rhel9-dev-image.tar.gz"
+"$ENGINE" save "$IMAGE_NAME" | "$GZIP_CMD" > "$PKG/$IMAGE_TAR"
 
-# Only what running the image for development needs; building it is this
-# repo's job. run-dhcp.sh stays in the repo: deployed copies are for
-# development, not DHCP.
-cp "$HERE/run.sh" "$HERE/engine.sh" "$HERE/install-shared.sh" "$HERE/README.md" "$PKG/"
-cp "$HERE/INSTALL-PACKAGE.md" "$PKG/INSTALL.md"
+# Only what using the image needs; building it is this repo's job.
+# run-dhcp.sh stays in the repo: deployed copies are for development, not
+# DHCP. The runtime package needs only the installer, which also writes
+# each application's service.
+if [[ "$RUNTIME" -eq 1 ]]; then
+    SCRIPTS=(install-shared.sh)
+    cp "$HERE/INSTALL-RUNTIME.md" "$PKG/INSTALL.md"
+else
+    SCRIPTS=(run.sh engine.sh install-shared.sh)
+    cp "$HERE/INSTALL-PACKAGE.md" "$PKG/INSTALL.md"
+fi
+for f in "${SCRIPTS[@]}"; do cp "$HERE/$f" "$PKG/"; done
+cp "$HERE/README.md" "$PKG/"
 
 {
     echo "image:      $IMAGE_NAME $("$ENGINE" image inspect "$IMAGE_NAME" --format '{{.Id}}')"
     echo "packaged:   $(date -Iseconds)"
-    echo "repo:       $(git -C "$HERE" rev-parse --short HEAD)$(git -C "$HERE" diff --quiet HEAD -- run.sh engine.sh install-shared.sh || echo ' (scripts modified)')"
+    echo "repo:       $(git -C "$HERE" rev-parse --short HEAD)$(git -C "$HERE" diff --quiet HEAD -- "${SCRIPTS[@]}" run-app.sh Dockerfile || echo ' (modified)')"
+    if [[ "$RUNTIME" -eq 1 ]]; then
+        echo "java:       $("$ENGINE" run --rm "$IMAGE_NAME" --version 2>&1 | head -n1)"
+    fi
 } > "$PKG/PACKAGE-INFO"
-# The OMP bundle in the image, to diff against the hosts' /opt/omp/BUILD-INFO.
-"$ENGINE" run --rm "$IMAGE_NAME" cat /opt/omp/BUILD-INFO > "$PKG/OMP-BUILD-INFO" 2>/dev/null \
-    || { rm -f "$PKG/OMP-BUILD-INFO"; echo "note: image has no OMP bundle" >&2; }
+if [[ "$RUNTIME" -eq 0 ]]; then
+    # The OMP bundle in the image, to diff against the hosts' /opt/omp/BUILD-INFO.
+    "$ENGINE" run --rm "$IMAGE_NAME" cat /opt/omp/BUILD-INFO > "$PKG/OMP-BUILD-INFO" 2>/dev/null \
+        || { rm -f "$PKG/OMP-BUILD-INFO"; echo "note: image has no OMP bundle" >&2; }
+fi
 
-(cd "$PKG" && sha256sum rhel9-dev-image.tar.gz run.sh engine.sh install-shared.sh > SHA256SUMS)
+(cd "$PKG" && sha256sum "$IMAGE_TAR" "${SCRIPTS[@]}" > SHA256SUMS)
 tar -C "$OUT_DIR" -cf "$PKG.tar" "$NAME"
 
 echo

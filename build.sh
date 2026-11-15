@@ -2,6 +2,9 @@
 # Builds the rhel9-dev image with docker or podman.
 #
 #   ./build.sh [--subscription] [--omp-bundle PATH | --no-omp]
+#   ./build.sh --runtime     builds rhel9-runtime instead: Java 21 runtime and
+#                            the offline maps, for running a built application
+#                            as a system service (README: Runtime image)
 #
 # Installs the OMP coding agent from the newest omp_distro bundle, if any
 # (see the OMP section of the README). ROUTELM_URL=... overrides the model
@@ -13,7 +16,7 @@
 # arguments/history.
 set -euo pipefail
 
-IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
+IMAGE_NAME="${IMAGE_NAME:-}"
 SECRETS_DIR="$(dirname "$0")/.secrets"
 
 # Sets ENGINE (docker or podman); override with ENGINE=podman ./build.sh
@@ -30,15 +33,27 @@ STAGE_DIR="$(dirname "$0")/omp-bundle"
 
 USE_SUBSCRIPTION=0
 USE_OMP=1
+RUNTIME=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --subscription) USE_SUBSCRIPTION=1; shift ;;
         --omp-bundle)   [[ $# -ge 2 ]] || { echo "error: --omp-bundle needs a path" >&2; exit 2; }
                         OMP_BUNDLE="$2"; shift 2 ;;
         --no-omp)       USE_OMP=0; shift ;;
+        --runtime)      RUNTIME=1; shift ;;
         *)              echo "error: unknown option: $1" >&2; exit 2 ;;
     esac
 done
+
+if [[ "$RUNTIME" -eq 1 ]]; then
+    IMAGE_NAME="${IMAGE_NAME:-rhel9-runtime}"
+    TARGET=runtime
+    USE_OMP=0           # the runtime image has no OMP (or anything else to develop with)
+    [[ "$USE_SUBSCRIPTION" -eq 0 ]] || { echo "error: --subscription is for the dev image only" >&2; exit 2; }
+else
+    IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
+    TARGET=dev
+fi
 
 # Stage the bundle where the Dockerfile's bind mount can see it. A hard link
 # avoids copying ~1 GB when dist/ is on the same filesystem.
@@ -88,10 +103,14 @@ ENGINE_ARGS=()
 
 # DOCKER_BUILDKIT is a no-op under podman and required under older docker.
 DOCKER_BUILDKIT=1 "$ENGINE" build "${ENGINE_ARGS[@]}" "${SECRET_ARGS[@]}" \
-    --build-arg "ROUTELM_URL=$ROUTELM_URL" -t "$IMAGE_NAME" "$(dirname "$0")"
+    --build-arg "ROUTELM_URL=$ROUTELM_URL" --target "$TARGET" -t "$IMAGE_NAME" "$(dirname "$0")"
 
 echo
 echo "Built image: $IMAGE_NAME (engine: $ENGINE)"
+if [[ "$RUNTIME" -eq 1 ]]; then
+    echo "Package it with:  ./package.sh --runtime   (see README: Runtime image)"
+    exit 0
+fi
 echo "Run it with:  ./run.sh   (see README: Run)"
 if [[ "$USE_OMP" -eq 1 && -n "$OMP_BUNDLE" ]]; then
     echo "Run OMP with: ./run.sh --omp [REPO]"

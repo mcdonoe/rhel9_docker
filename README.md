@@ -10,10 +10,16 @@ plus an opt-in dnsmasq DHCP server (see below).
 The same Dockerfile also builds `rhel9-runtime`, a small image for running a
 built Java application as a system service (see [Runtime image](#runtime-image)).
 
+**New here? Start with [PROCEDURES.md](PROCEDURES.md)**: step-by-step
+instructions for building, packaging, installing on an air-gapped machine,
+developing, and running applications as services. This README is the
+reference behind it.
+
 ## Repo layout
 
 | File | Purpose |
 | --- | --- |
+| `PROCEDURES.md` | Step-by-step guide to the whole workflow: start here |
 | `Dockerfile` | The image definition |
 | `build.sh` | Builds it, optionally registering with Red Hat (`--subscription`) |
 | `run.sh` | Starts a dev shell, one command, or the OMP agent (`--omp`), as you; `--check` checks your setup |

@@ -20,9 +20,11 @@ SECRETS_DIR="$(dirname "$0")/.secrets"
 source "$(dirname "$0")/engine.sh"
 
 # OMP bundle to install: --omp-bundle PATH (or OMP_BUNDLE=PATH), else the
-# newest one omp_distro has built. --no-omp builds without OMP.
+# newest one omp_distro has built. omp_distro is checked out next to this
+# repo (GIT_REPOS/omp_distro beside GIT_REPOS/rhel9_docker), wherever
+# GIT_REPOS is. --no-omp builds without OMP.
 OMP_BUNDLE="${OMP_BUNDLE:-}"
-OMP_DIST="${OMP_DIST:-$HOME/GIT_REPOS/omp_distro/dist}"
+OMP_DIST="${OMP_DIST:-$(cd "$(dirname "$0")/.." && pwd)/omp_distro/dist}"
 ROUTELM_URL="${ROUTELM_URL:-http://192.168.1.151:11400/v1}"
 STAGE_DIR="$(dirname "$0")/omp-bundle"
 

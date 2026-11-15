@@ -91,8 +91,10 @@ Running Container"), use your own user name: `docker exec -u <you> -it
 Your git repo base directory is chosen in this order:
 
 1. `WORKSPACE=/path/to/repos ./run.sh` if set
-2. `~/GIT_REPOS` if it exists
-3. otherwise `run.sh` asks once and saves the answer in
+2. the directory holding this repo, when `run.sh` is run from the git
+   checkout (e.g. `/STORAGE/GIT_REPOS` for `/STORAGE/GIT_REPOS/rhel9_docker`)
+3. `~/GIT_REPOS` if it exists (e.g. the installed `rhel9-dev` command)
+4. otherwise `run.sh` asks once and saves the answer in
    `~/.config/rhel9-dev/workspace` (edit or delete it to change)
 
 It's mounted at **the same path as on the host** (e.g. `/home/you/GIT_REPOS`),
@@ -279,7 +281,9 @@ same config, as on the host, just sandboxed.
 ```
 
 - **Which bundle**: `build.sh` takes the newest
-  `~/GIT_REPOS/omp_distro/dist/omp-portable-*-linux-x64.tar.gz` (point it at
+  `omp-portable-*-linux-x64.tar.gz` in `omp_distro/dist/`, with `omp_distro`
+  checked out next to this repo (`GIT_REPOS/omp_distro` beside
+  `GIT_REPOS/rhel9_docker`, wherever `GIT_REPOS` is) (point it at
   another `dist/` with `OMP_DIST=`). Pick a specific bundle with
   `--omp-bundle PATH`, or leave OMP out with `--no-omp`. The image is shared:
   build it once and every user runs the same OMP. With no bundle

@@ -15,8 +15,9 @@
 #                              there is one) and that a container starts
 #                              quickly as you, with working sudo
 #
-# Your repo base directory is $WORKSPACE if set, else ~/GIT_REPOS if it
-# exists, else the directory you were asked for once and that was saved in
+# Your repo base directory is $WORKSPACE if set, else the directory holding
+# this repo's checkout (if run from one), else ~/GIT_REPOS if it exists,
+# else the directory you were asked for once and that was saved in
 # ~/.config/rhel9-dev/workspace. It's mounted at the same path as on the host
 # (with /workspace as a symlink to it), and so is your ~/.omp: OMP sees the
 # same paths, config, sessions and memory in the container as on the host.
@@ -65,7 +66,7 @@ HERE="$(dirname "$(readlink -f "$0")")"
 source "$HERE/engine.sh"
 
 usage() {
-    sed -n '2,28p' "$0" | sed 's/^# \?//'
+    sed -n '2,34p' "$0" | sed 's/^# \?//'
 }
 
 die() {
@@ -73,11 +74,18 @@ die() {
     exit 1
 }
 
-# Sets WORKSPACE. Asks only when there's no $WORKSPACE, no ~/GIT_REPOS and no
-# saved answer that still exists, and remembers the answer.
+# Sets WORKSPACE. Asks only when there's no $WORKSPACE, this isn't a git
+# checkout, there's no ~/GIT_REPOS and no saved answer that still exists,
+# and remembers the answer.
 resolve_workspace() {
     if [[ -n "${WORKSPACE:-}" ]]; then
         [[ -d "$WORKSPACE" ]] || die "WORKSPACE '$WORKSPACE' does not exist"
+        return
+    fi
+    # Run from the repo checkout (not an installed copy): the directory
+    # holding it is the repo base, e.g. GIT_REPOS for GIT_REPOS/rhel9_docker.
+    if [[ -e "$HERE/.git" ]]; then
+        WORKSPACE="$(dirname "$HERE")"
         return
     fi
     if [[ -d "$HOME/GIT_REPOS" ]]; then

@@ -1,0 +1,5 @@
+# Not part of the build context (see .gitignore for git).
+npm-vendor/node_modules
+.git
+dist
+.secrets

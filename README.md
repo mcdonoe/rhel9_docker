@@ -2,7 +2,8 @@
 
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
 gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
-OpenJDK 21 + Ant, Boost 1.81, uv, vim, btop,
+OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium,
+Firefox), Boost 1.81, uv, vim, btop,
 the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
 plus an opt-in dnsmasq DHCP server (see below).
 
@@ -21,6 +22,9 @@ plus an opt-in dnsmasq DHCP server (see below).
 | `INSTALL-PACKAGE.md` | The package's install guide (shipped as `INSTALL.md`) |
 | `dnsmasq/dhcp.conf.example` | Template to copy to `dhcp.conf` (gitignored) |
 | `omp-bundle/` | Where `build.sh` stages the OMP bundle for the build (contents gitignored) |
+| `npm-vendor/` | The vendored npm packages and the offline registry that serves them (see its README) |
+| `fetch-maps.sh` | Downloads the eastern seaboard map tiles into `maps/` for the next build |
+| `maps/` | Where map tiles are staged for the build (contents gitignored) |
 | `.secrets/` | Cached Red Hat credentials (gitignored, created on demand) |
 
 ## Build
@@ -122,15 +126,20 @@ would hide the image's own files.
   Add more shared host directories to `HOST_RO_DIRS` in `run.sh`. Under
   rootless podman, files owned by host root show up as owned by `nobody`, so
   you can only read what's world-readable on the host.
-- **Per-user named volumes** for the Go caches (`rhel9-dev-<you>-gopath`,
-  `rhel9-dev-<you>-gocache`), so repeated builds skip re-downloading modules.
-  Remove yours with
-  `docker volume rm rhel9-dev-$USER-gopath rhel9-dev-$USER-gocache`.
+- **The host's network (`--network host`)**, so a dev server you start in
+  the container (Vite, Storybook, Spring Boot...) is at
+  `http://localhost:<port>` in the host's browser, with no port mapping.
+  Two servers on one port clash, just as natively. The container can reach
+  whatever the host can, including services on the host's localhost.
+- **Per-user named volumes** for the Go, pnpm and Maven caches
+  (`rhel9-dev-<you>-gopath`, `-gocache`, `-pnpm-store`, `-m2`), so repeated
+  builds skip re-downloading packages. Remove yours with
+  `docker volume rm rhel9-dev-$USER-{gopath,gocache,pnpm-store,m2}`.
 
 The equivalent by hand:
 
 ```
-docker run -it --rm --security-opt seccomp=unconfined \
+docker run -it --rm --network host --security-opt seccomp=unconfined \
     -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) -e HOST_USER=$USER \
     -e HOST_HOME=$HOME -e HOST_WORKSPACE=$HOME/GIT_REPOS \
     -v "$HOME/GIT_REPOS:$HOME/GIT_REPOS" -v "$HOME/.omp:$HOME/.omp" \
@@ -191,6 +200,61 @@ covers development use only; it leaves out `run-dhcp.sh`. See
   `-lboost_<lib>` work without `-I` or `-L` flags. In CMake, use
   `find_package(Boost 1.81 CONFIG REQUIRED COMPONENTS ...)`. Boost.Python
   and Boost.MPI aren't built.
+- **Web development**: Node.js 22 with npm, pnpm, Maven 3.9 and the JDK's
+  `jmods` (for `jlink`/`jpackage`), matching the toolchain in the
+  air-gapped build tooling guide:
+  - Node.js 22 and Maven 3.9 come from RHEL's module streams, enabled in the
+    Dockerfile; without that, dnf picks an end-of-life Node.js and Maven
+    3.6. `nodejs-devel` is installed so node-gyp can build native npm
+    packages without downloading Node's headers.
+  - pnpm is the official standalone build, version-pinned
+    (`PNPM_VERSION`/`PNPM_SHA256`). Projects pin theirs with
+    `"packageManager"` in `package.json`; keep the two in step.
+  - **npm packages are vendored.** There's no npm registry where the UI
+    is developed, so the packages the console UI's design calls for are
+    baked into the image, and the entrypoint serves them from a local
+    registry that npm and pnpm use automatically. `pnpm install` and
+    `pnpm add` work offline as usual; a package that isn't vendored fails
+    at once with a 404. What's vendored, and how to add more, is in
+    [npm-vendor/README.md](npm-vendor/README.md). On a connected machine,
+    `-e npm_config_registry=https://registry.npmjs.org/` uses the public
+    registry instead.
+  - **Maven packages come from the project**, which carries its own
+    repository and points `maven.repo.local` at it; the image adds none.
+- **Playwright**: vendored, so browser tests need no network. Chromium and
+  Firefox are in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`), with
+  the RHEL libraries they need, and the build launches both to prove they
+  run. Things to know:
+  - **Use exactly the image's version.** Browser builds belong to one
+    Playwright release, so a project's `@playwright/test` must be
+    `$RHEL9DEV_PLAYWRIGHT_VERSION` (`PLAYWRIGHT_VERSION` in the Dockerfile).
+    Otherwise tests fail with "Executable doesn't exist at
+    /opt/ms-playwright/...". To upgrade, bump it here, rebuild, and update
+    projects together.
+  - **No WebKit.** Its builds need Ubuntu 24.04's library versions, which
+    RHEL9 doesn't have. Configure projects for `chromium` and `firefox`
+    only.
+  - **Headless only.** There's no display in the container, so use
+    headless runs (the default), or `--ui`/`show-report` served over the
+    host network and opened in the host's browser.
+  - `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` is set, so installing packages
+    never tries to fetch browsers.
+- **Maps**: offline map data and assets for MapLibre, in `/opt/maps`:
+  - `eastern-seaboard.pmtiles`, the US eastern seaboard (Maine to the
+    Florida Keys) from OpenStreetMap, via Protomaps' basemap build, zoom
+    0-11 (about 350 MB). It isn't in git: `./fetch-maps.sh` downloads it into
+    `maps/` (connected machine), and the next `./build.sh` bakes it in.
+    `./fetch-maps.sh --dry-run` shows the size first; `--maxzoom` sets
+    detail (each level about doubles the size). `eastern-seaboard.json` beside it records the source and date.
+  - `basemaps-assets/`: the fonts (glyph PBFs) and sprites the map styles
+    use. Without local glyphs, labels fail offline.
+  - The styles come from the vendored `@protomaps/basemaps` package (dark,
+    light, and more). Point their `glyphs` and `sprite` URLs, and the
+    `pmtiles://` source, at wherever the app serves `/opt/maps`.
+  - `pmtiles` (the CLI) is installed for inspecting (`pmtiles show`) and
+    serving archives.
+  - OpenStreetMap data is ODbL: the map must show "© OpenStreetMap
+    contributors".
 - **Ant/Java**: Ant isn't packaged for RHEL9 or EPEL9 at all, so it's
   installed from the official Apache tarball (checksum-pinned in the
   Dockerfile) against OpenJDK 21.

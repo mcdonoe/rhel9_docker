@@ -25,6 +25,12 @@
 #   WORKSPACE=DIR              your repo base directory
 #   IMAGE_NAME=rhel9-dev       image to run
 #   ENGINE=docker|podman       see engine.sh
+#   npm_config_registry=URL    npm/pnpm registry to use instead of the
+#                              image's offline vendored one. On a connected
+#                              machine, for builds that need the public
+#                              registry (omp_distro's build.sh does):
+#                                npm_config_registry=https://registry.npmjs.org/ ./run.sh ...
+#                              (pnpm_config_registry is passed through too)
 #
 # What it sets up, compared with a bare `docker run -it rhel9-dev bash`:
 #   - your host UID/GID inside the container (see entrypoint.sh), so files
@@ -41,9 +47,11 @@
 #     the host has none).
 #   - a login shell, so /etc/profile.d sets PATH, GOTOOLCHAIN and friends
 #     the same way `su -` would.
-#   - per-user named volumes for the Go module and build caches, so repeat
-#     builds don't re-download every module. Drop yours with:
-#         $ENGINE volume rm rhel9-dev-$USER-gopath rhel9-dev-$USER-gocache
+#   - the host's network (--network host), so a dev server you start in the
+#     container is at localhost:<port> in the host's browser.
+#   - per-user named volumes for the Go, pnpm and Maven caches, so repeat
+#     builds don't re-download or re-copy every package. Drop yours with:
+#         $ENGINE volume rm rhel9-dev-$USER-{gopath,gocache,pnpm-store,m2}
 set -euo pipefail
 
 IMAGE_NAME="${IMAGE_NAME:-rhel9-dev}"
@@ -206,15 +214,27 @@ fi
 #
 # The container always starts as root so the entrypoint can create your
 # user; it then drops to it.
+#
+# --network host: dev servers in the container (Vite, Storybook, Spring
+# Boot...) are reachable from the host's browser at localhost:<port> with
+# no port mapping, exactly as if they ran natively, and two servers on one
+# port clash just as they would natively. Docker refuses --hostname with it,
+# so only podman gets one (the prompt then shows rhel9-dev; with docker it
+# shows the host's name).
 ARGS=(
     run --rm "${TTY_ARGS[@]}"
-    --hostname rhel9-dev
+    --network host
     --user 0
     --security-opt label=disable
     -v "$WORKSPACE:$WORKSPACE"
     -e "HOST_WORKSPACE=$WORKSPACE"
     -w "$WORKDIR"
 )
+[[ "$ENGINE_IS_PODMAN" -eq 1 ]] && ARGS+=(--hostname rhel9-dev)
+# A registry chosen on the host replaces the vendored one (entrypoint.sh).
+for v in npm_config_registry pnpm_config_registry; do
+    [[ -n "${!v:-}" ]] && ARGS+=(-e "$v=${!v}")
+done
 [[ "$RUN_OMP" -eq 1 ]] || ARGS+=(--security-opt seccomp=unconfined)
 
 # Host directories shared into every container, read-only, at the same path.
@@ -247,6 +267,8 @@ if [[ "$AS_ROOT" -eq 0 && "$(id -u)" -ne 0 ]]; then
         -e "HOST_HOME=$HOME"
         -v "rhel9-dev-$CUSER-gopath:$HOME/go"
         -v "rhel9-dev-$CUSER-gocache:$HOME/.cache/go-build"
+        -v "rhel9-dev-$CUSER-pnpm-store:$HOME/.local/share/pnpm"
+        -v "rhel9-dev-$CUSER-m2:$HOME/.m2"
         -v "$HOME/.omp:$HOME/.omp"
     )
     # keep-id maps your host UID to the same UID inside the container; without

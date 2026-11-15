@@ -1,0 +1,4 @@
+# Settings used when (re)generating pnpm-lock.yaml; see README.md.
+# Only versions published at least 14 days ago (in minutes), so a release
+# pulled within days of publishing never gets vendored.
+minimumReleaseAge: 20160

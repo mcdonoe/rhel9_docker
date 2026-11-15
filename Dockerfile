@@ -9,7 +9,7 @@
 
 FROM redhat/ubi9
 
-LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant, Boost 1.81, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
+LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium, Firefox), Boost 1.81, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
 
 # ---------------------------------------------------------------------------
 # Container-engine neutrality (podman vs docker).
@@ -67,6 +67,9 @@ RUN --mount=type=secret,id=rh_username \
     fi; \
     dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm; \
     /usr/bin/crb enable; \
+    # Node.js 22 and Maven 3.9 are module streams. Without enabling them dnf
+    # installs RHEL9's defaults: an end-of-life Node.js and Maven 3.6.
+    dnf module enable -y nodejs:22 maven:3.9; \
     dnf install -y \
         # --- version control / build systems ---
         git git-lfs cmake make patch \
@@ -83,8 +86,21 @@ RUN --mount=type=secret,id=rh_username \
         python3.11 python3.11-devel python3.11-pip \
         python3.12 python3.12-devel python3.12-pip \
         python3.14 python3.14-devel python3.14-pip \
-        # --- Java, for Ant (installed by hand below) ---
-        java-21-openjdk-devel \
+        # --- Java 21: jmods for jlink/jpackage, Maven 3.9 (Ant is installed by hand below) ---
+        java-21-openjdk-devel java-21-openjdk-jmods maven-openjdk21 \
+        # --- web: Node.js 22 + npm; nodejs-devel holds the headers node-gyp
+        #     needs to build native npm packages without downloading them ---
+        nodejs npm nodejs-devel \
+        # --- packaging builds as RPMs ---
+        rpm-build \
+        # --- libraries and fonts Playwright's Chromium and Firefox need
+        #     (Playwright's own install-deps only knows apt) ---
+        nss nspr atk at-spi2-atk at-spi2-core cups-libs libdrm libxkbcommon \
+        mesa-libgbm alsa-lib cairo-gobject gtk3 dbus-glib dbus-libs libatomic \
+        libX11 libX11-xcb libxcb libXcomposite libXcursor libXdamage libXext \
+        libXfixes libXi libXrandr libXrender libXtst libxshmfence \
+        fontconfig freetype liberation-fonts-common liberation-mono-fonts \
+        dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts \
         # --- native libs needed by common Python packages (e.g. WeasyPrint) ---
         cairo pango gdk-pixbuf2 libffi-devel \
         # --- editor / terminal tooling ---
@@ -124,6 +140,67 @@ RUN set -eux; \
 # (in your GIT_REPOS) uses it for dependency resolution via uv.lock.
 # ---------------------------------------------------------------------------
 RUN curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# ---------------------------------------------------------------------------
+# pnpm — not packaged for RHEL. The official standalone build (it carries
+# its own Node.js, so it doesn't depend on the system one), checksum pinned.
+# The binary needs the dist/ directory beside it, so the whole release goes
+# in /opt/pnpm. Bump PNPM_VERSION/PNPM_SHA256 together; GitHub shows each
+# release asset's sha256 digest. Projects pin their own pnpm version with
+# "packageManager" in package.json; keep this in step with that.
+#
+# Each user's package store defaults to ~/.local/share/pnpm/store, which
+# run.sh keeps in a per-user named volume.
+# ---------------------------------------------------------------------------
+ARG PNPM_VERSION=12.16.1
+ARG PNPM_SHA256=565ff81174a14f6f7bd5d84c1b17e51031a80230d370a1fe24be5d16bd02a825
+
+RUN set -eux; \
+    curl -fsSL -o /tmp/pnpm.tar.gz \
+        "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/pnpm-linux-x64.tar.gz"; \
+    echo "${PNPM_SHA256}  /tmp/pnpm.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/pnpm; \
+    tar -xzf /tmp/pnpm.tar.gz -C /opt/pnpm; \
+    rm /tmp/pnpm.tar.gz; \
+    chown -R root:root /opt/pnpm; \
+    ln -s /opt/pnpm/pnpm /usr/local/bin/pnpm; \
+    [ "$(pnpm --version)" = "${PNPM_VERSION}" ]
+
+# ---------------------------------------------------------------------------
+# Playwright, vendored: its browsers live in the image, so browser tests run
+# with no network. Playwright only supports Ubuntu/Debian officially, but
+# its Chromium and Firefox run on UBI9 with the libraries installed above.
+# WebKit doesn't: it's built against Ubuntu 24.04's exact library versions
+# (ICU 74, GTK4, GStreamer, WPE...), so it isn't installed.
+#
+# Browser builds are tied to the Playwright version, so a project must use
+# exactly PLAYWRIGHT_VERSION for its @playwright/test devDependency. A
+# mismatch fails with "Executable doesn't exist at /opt/ms-playwright/...".
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD stops package installs from fetching
+# browsers. The `playwright` CLI is also installed globally, for
+# `playwright --version` and codegen-free one-offs.
+#
+# The last step launches both browsers and renders a page, so a build that
+# succeeds is known to run them.
+# ---------------------------------------------------------------------------
+ARG PLAYWRIGHT_VERSION=1.64.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    RHEL9DEV_PLAYWRIGHT_VERSION=${PLAYWRIGHT_VERSION}
+
+RUN set -eux; \
+    npm install -g --no-fund --no-audit "playwright@${PLAYWRIGHT_VERSION}"; \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= playwright install chromium chromium-headless-shell firefox; \
+    chmod -R a+rX /opt/ms-playwright; \
+    rm -rf /root/.npm; \
+    NODE_PATH="$(npm root -g)" node -e ' \
+        const pw = require("playwright"); \
+        (async () => { for (const n of ["chromium", "firefox"]) { \
+            const b = await pw[n].launch(); const p = await b.newPage(); \
+            await p.setContent("<p id=x>ok</p>"); \
+            if (await p.textContent("#x") !== "ok") throw new Error(n); \
+            console.log(n, b.version(), "ok"); await b.close(); } })() \
+        .catch(e => { console.error(e); process.exit(1); });'
 
 # ---------------------------------------------------------------------------
 # Boost — built from the official source release, checksum pinned. RHEL9
@@ -225,6 +302,8 @@ RUN cat > /etc/profile.d/10-dev-env.sh <<'EOF_PROFILE'
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 export ANT_HOME=/opt/ant
 export GOTOOLCHAIN=local
+export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 for d in /opt/ant/bin /usr/local/go/bin; do
@@ -258,6 +337,7 @@ ARG ROUTELM_URL=http://192.168.1.151:11400/v1
 
 RUN --mount=type=bind,source=omp-bundle,target=/mnt/omp-bundle \
     set -eux; \
+    ls /mnt/omp-bundle >/dev/null || { echo "error: can't read omp-bundle/ (SELinux? build with ./build.sh)" >&2; exit 1; }; \
     set -- /mnt/omp-bundle/omp-portable-*.tar.gz; \
     if [ ! -e "$1" ]; then echo "No OMP bundle staged; skipping OMP."; exit 0; fi; \
     [ $# -eq 1 ] || { echo "error: more than one OMP bundle staged" >&2; exit 1; }; \
@@ -280,6 +360,81 @@ if [ -x /opt/omp/bin/omp-user-setup ] && [ "$(id -u)" -ne 0 ] && [ -w "$HOME" ] 
     /opt/omp/bin/omp-user-setup
 fi
 EOF_PROFILE
+
+# ---------------------------------------------------------------------------
+# Vendored npm packages, for development with no npm registry (air-gapped).
+#
+# npm-vendor/package.json lists the packages the console UI's design
+# proposal calls for, at exact versions, and npm-vendor/pnpm-lock.yaml pins
+# their whole dependency tree. build-registry.mjs turns that into a small
+# read-only registry in /opt/npm-registry holding only those versions, and
+# the entrypoint serves it on 127.0.0.1 and points npm and pnpm at it. So
+# `pnpm install` and `pnpm add <vendored package>` work as usual, offline,
+# and anything not vendored fails at once with a clear message instead of a
+# network timeout. See npm-vendor/README.md for adding packages.
+#
+# The last step installs the whole vendored set into a fresh project through
+# the registry alone, so a build that succeeds is known to serve everything.
+# ---------------------------------------------------------------------------
+COPY npm-vendor/ /opt/npm-vendor/
+RUN set -eux; \
+    node /opt/npm-vendor/build-registry.mjs /opt/npm-vendor/pnpm-lock.yaml /opt/npm-registry; \
+    cp /opt/npm-vendor/serve.mjs /opt/npm-registry/; \
+    chmod -R a+rX /opt/npm-vendor /opt/npm-registry; \
+    node /opt/npm-registry/serve.mjs /tmp/registry-port & REGISTRY_PID=$!; \
+    for _ in $(seq 50); do [ -s /tmp/registry-port ] && break; sleep 0.1; done; \
+    export pnpm_config_registry="http://127.0.0.1:$(cat /tmp/registry-port)/" \
+           pnpm_config_store_dir=/tmp/selftest-store pnpm_config_cache_dir=/tmp/selftest-cache; \
+    mkdir /tmp/selftest; cd /tmp/selftest; \
+    echo '{"name":"selftest","private":true}' > package.json; \
+    pnpm add --ignore-scripts $(node -e ' \
+        const p = require("/opt/npm-vendor/package.json"); \
+        for (const [n, v] of Object.entries(p.dependencies)) process.stdout.write(`${n}@${v} `);'); \
+    pnpm add -D --ignore-scripts $(node -e ' \
+        const p = require("/opt/npm-vendor/package.json"); \
+        for (const [n, v] of Object.entries(p.devDependencies)) process.stdout.write(`${n}@${v} `);'); \
+    kill "$REGISTRY_PID"; \
+    cd /; rm -rf /tmp/selftest /tmp/selftest-store /tmp/selftest-cache /tmp/registry-port
+
+# ---------------------------------------------------------------------------
+# Offline maps for MapLibre, in /opt/maps:
+#   - pmtiles: Protomaps' CLI (inspect, serve or cut .pmtiles archives),
+#     built from pinned source with the image's Go.
+#   - basemaps-assets/: the fonts (glyph PBFs) and sprites that Protomaps'
+#     map styles use, pinned to one commit. Without local glyphs, map labels
+#     fail offline. The style itself comes from the vendored npm package
+#     @protomaps/basemaps.
+#   - eastern-seaboard.pmtiles: the map tiles, if ./fetch-maps.sh has put
+#     them in maps/ (they're too big for git). Otherwise this is skipped and
+#     the image builds without them, as with the OMP bundle.
+# ---------------------------------------------------------------------------
+ARG PMTILES_VERSION=v1.31.2
+ARG BASEMAPS_ASSETS_COMMIT=028c18f713baecad011301ff7a69acc39bcc2ae7
+ARG BASEMAPS_ASSETS_SHA256=57e40e8c512bd8042d0a3a251f19d0d1c8523ad963c666c3c6643bada4dc92d0
+
+RUN set -eux; \
+    GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOBIN=/usr/local/bin \
+        go install "github.com/protomaps/go-pmtiles@${PMTILES_VERSION}"; \
+    mv /usr/local/bin/go-pmtiles /usr/local/bin/pmtiles; \
+    rm -rf /tmp/gopath /tmp/gocache; \
+    curl -fsSL -o /tmp/assets.tar.gz \
+        "https://github.com/protomaps/basemaps-assets/archive/${BASEMAPS_ASSETS_COMMIT}.tar.gz"; \
+    echo "${BASEMAPS_ASSETS_SHA256}  /tmp/assets.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/maps/basemaps-assets; \
+    tar -xzf /tmp/assets.tar.gz -C /opt/maps/basemaps-assets --strip-components=1 \
+        --wildcards '*/fonts' '*/sprites' '*/README.md'; \
+    rm /tmp/assets.tar.gz
+
+RUN --mount=type=bind,source=maps,target=/mnt/maps \
+    set -eux; \
+    ls /mnt/maps >/dev/null || { echo "error: can't read maps/ (SELinux? build with ./build.sh)" >&2; exit 1; }; \
+    if [ -f /mnt/maps/eastern-seaboard.pmtiles ]; then \
+        cp /mnt/maps/eastern-seaboard.pmtiles /mnt/maps/eastern-seaboard.json /opt/maps/; \
+        pmtiles show /opt/maps/eastern-seaboard.pmtiles | head -20; \
+    else \
+        echo "No maps/eastern-seaboard.pmtiles staged (see fetch-maps.sh); building without map tiles."; \
+    fi; \
+    chmod -R a+rX /opt/maps
 
 # No user is baked in. entrypoint.sh creates one at startup with the UID/GID
 # of whoever ran run.sh, so bind-mounted files keep their host ownership for

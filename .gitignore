@@ -3,3 +3,6 @@ dnsmasq/dhcp.conf
 omp-bundle/*
 !omp-bundle/.gitkeep
 dist/
+maps/*
+!maps/.gitkeep
+npm-vendor/node_modules/

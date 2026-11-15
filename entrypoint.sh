@@ -23,6 +23,36 @@ if [[ -n "${HOST_WORKSPACE:-}" && "$(id -u)" -eq 0 && ! -L /workspace ]] \
     ln -s "$HOST_WORKSPACE" /workspace
 fi
 
+# The vendored npm registry (see npm-vendor/README.md): start it on a free
+# port on 127.0.0.1 and point npm and pnpm at it, so installs work with no
+# network and see only vendored packages. Skipped if the caller already chose
+# a registry (e.g. -e npm_config_registry=https://registry.npmjs.org/ on a
+# connected machine). It runs as nobody and dies with the container.
+REGISTRY_DIR=/opt/npm-registry
+if [[ -z "${npm_config_registry:-}${pnpm_config_registry:-}" && -f "$REGISTRY_DIR/serve.mjs" ]]; then
+    portfile="$(mktemp)"
+    if [[ "$(id -u)" -eq 0 ]]; then
+        chown 65534:65534 "$portfile"
+        setpriv --reuid=65534 --regid=65534 --clear-groups \
+            node "$REGISTRY_DIR/serve.mjs" "$portfile" </dev/null >/dev/null 2>&1 &
+    else
+        node "$REGISTRY_DIR/serve.mjs" "$portfile" </dev/null >/dev/null 2>&1 &
+    fi
+    for _ in $(seq 50); do [[ -s "$portfile" ]] && break; sleep 0.1; done
+    if [[ -s "$portfile" ]]; then
+        export npm_config_registry="http://127.0.0.1:$(<"$portfile")/"
+        export pnpm_config_registry="$npm_config_registry"
+        # For shells started later with `exec`, which don't inherit this.
+        if [[ -w /etc/profile.d ]]; then
+            printf 'export npm_config_registry=%s\nexport pnpm_config_registry=%s\n' \
+                "$npm_config_registry" "$npm_config_registry" > /etc/profile.d/05-npm-registry.sh
+        fi
+    else
+        echo "entrypoint: the vendored npm registry didn't start; npm and pnpm use their defaults" >&2
+    fi
+    rm -f "$portfile"
+fi
+
 if [[ -z "${HOST_UID:-}" || "$(id -u)" -ne 0 ]]; then
     exec "$@"
 fi
@@ -69,7 +99,8 @@ chmod 440 /etc/sudoers.d/90-host-user
 # bind-mounted under it and their ownership is the host's business.
 mkdir -p "$home"
 cp -rn /etc/skel/. "$home/"
-for d in "$home" "$home/go" "$home/.cache" "$home/.cache/go-build"; do
+for d in "$home" "$home/go" "$home/.cache" "$home/.cache/go-build" \
+        "$home/.local" "$home/.local/share" "$home/.local/share/pnpm" "$home/.m2"; do
     if [[ -d "$d" && "$(stat -c %u "$d")" -eq 0 ]]; then
         chown "$HOST_UID:$HOST_GID" "$d"
     fi

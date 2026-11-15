@@ -51,7 +51,7 @@ if [[ "$USE_OMP" -eq 1 ]]; then
         ln -f "$OMP_BUNDLE" "$STAGE_DIR/" 2>/dev/null || cp "$OMP_BUNDLE" "$STAGE_DIR/"
     else
         echo "No OMP bundle in $OMP_DIST; building without OMP."
-        echo "  (build one with: ./run.sh 'cd omp_distro && ./build.sh')"
+        echo "  (build one with: npm_config_registry=https://registry.npmjs.org/ ./run.sh 'cd omp_distro && ./build.sh')"
     fi
 fi
 
@@ -78,8 +78,14 @@ if [[ "$USE_SUBSCRIPTION" -eq 1 ]]; then
     SECRET_ARGS+=(--secret "id=rh_username,src=$USER_FILE" --secret "id=rh_password,src=$PASS_FILE")
 fi
 
+# Podman applies SELinux to the build's bind mounts (maps/, omp-bundle/),
+# and repo files without a container label read as
+# "Permission denied". Turn labeling off for the build, as run.sh does.
+ENGINE_ARGS=()
+[[ "$ENGINE" == podman ]] && ENGINE_ARGS+=(--security-opt label=disable)
+
 # DOCKER_BUILDKIT is a no-op under podman and required under older docker.
-DOCKER_BUILDKIT=1 "$ENGINE" build "${SECRET_ARGS[@]}" \
+DOCKER_BUILDKIT=1 "$ENGINE" build "${ENGINE_ARGS[@]}" "${SECRET_ARGS[@]}" \
     --build-arg "ROUTELM_URL=$ROUTELM_URL" -t "$IMAGE_NAME" "$(dirname "$0")"
 
 echo

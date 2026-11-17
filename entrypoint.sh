@@ -18,6 +18,29 @@
 # host path); /workspace becomes a symlink to it.
 set -euo pipefail
 
+# fuse-overlayfs before 1.14 (all of RHEL 8's) copies a directory up into the
+# container's writable layer with the owner and mode it has on disk, not the
+# ones the image gives it. From a shared image store (install-shared.sh) that
+# is nobody and 0755, so the first file created in /tmp leaves /tmp
+# unwritable for the user, and writing /etc/sudoers.d breaks sudo ("is owned
+# by uid 65534, should be 0"). As root, note the image's owner and mode of
+# the directories a session writes to before anything writes, and set them
+# back (which also does the copy-up now) before running the command.
+# Elsewhere this changes nothing.
+IMAGE_DIRS=(/etc /etc/profile.d /etc/sudoers.d /tmp /var/tmp)
+image_dir_stats=""
+if [[ "$(id -u)" -eq 0 ]]; then
+    image_dir_stats="$(stat -c '%u:%g %a %n' "${IMAGE_DIRS[@]}" 2>/dev/null || true)"
+fi
+restore_image_dirs() {
+    local owner mode dir
+    while read -r owner mode dir; do
+        [[ -d "$dir" ]] || continue
+        chown "$owner" "$dir" && chmod "$mode" "$dir" \
+            || echo "entrypoint: couldn't set $dir back to $owner $mode" >&2
+    done <<<"$image_dir_stats"
+}
+
 if [[ -n "${HOST_WORKSPACE:-}" && "$(id -u)" -eq 0 && ! -L /workspace ]] \
         && rmdir /workspace 2>/dev/null; then
     ln -s "$HOST_WORKSPACE" /workspace
@@ -54,6 +77,7 @@ if [[ -z "${npm_config_registry:-}${pnpm_config_registry:-}" && -f "$REGISTRY_DI
 fi
 
 if [[ -z "${HOST_UID:-}" || "$(id -u)" -ne 0 ]]; then
+    restore_image_dirs
     exec "$@"
 fi
 HOST_GID="${HOST_GID:-$HOST_UID}"
@@ -71,7 +95,7 @@ if [[ "$HOST_HOME" != /?* || "$HOST_HOME" == *..* ]]; then
     echo "entrypoint: HOST_HOME '$HOST_HOME' must be an absolute path other than /" >&2
     exit 1
 fi
-[[ "$HOST_UID" -ne 0 ]] || exec "$@"
+[[ "$HOST_UID" -ne 0 ]] || { restore_image_dirs; exec "$@"; }
 home="$HOST_HOME"
 
 # Reuse a group that already has this GID (e.g. 100 "users"), else make one.
@@ -106,5 +130,6 @@ for d in "$home" "$home/go" "$home/.cache" "$home/.cache/go-build" \
     fi
 done
 
+restore_image_dirs
 exec setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --init-groups \
     env HOME="$home" USER="$name" LOGNAME="$name" "$@"

@@ -72,7 +72,8 @@
 #      mount_program = fuse-overlayfs, which lets rootless podman use the
 #      store's root-owned files, as root, without making each user a private
 #      copy of the image (the store itself is loaded with force_mask=shared,
-#      which records each file's owner and mode for fuse-overlayfs). Backs
+#      which records each file's owner and mode for fuse-overlayfs, and
+#      then repaired, since podman 4.x records setuid bits wrongly). Backs
 #      storage.conf up first.
 #   5. installs the scripts to PREFIX and links BINDIR/rhel9-dev to run.sh
 #   6. lists users whose own ~/.config/containers/storage.conf would hide
@@ -463,8 +464,9 @@ fi
 # at once can deadlock on its lock files.
 #
 # force_mask=shared stores every file as root-owned 0755 and keeps its real
-# owner and mode (setuid bits included) in a user.containers.override_stat
-# xattr, which fuse-overlayfs shows inside users' containers. Without it,
+# owner and mode in a user.containers.override_stat xattr, which
+# fuse-overlayfs shows inside users' containers (after the repair below,
+# which podman 4.x needs for setuid bits and layer roots). Without it,
 # rootless users see the store's root-owned files as owned by nobody, so
 # sudo and anything else that checks ownership breaks. It needs
 # fuse-overlayfs, so --no-fuse-overlayfs leaves both out.
@@ -551,6 +553,98 @@ mkdir -p "$STORE"
 chmod 755 "$STORE"
 set_load_tmpdir "$IMAGE_TAR"
 store_podman load -i "$IMAGE_TAR"
+
+# force_mask's xattrs, as podman 4.x (RHEL 8) writes them, don't work: it
+# drops the setuid, setgid and sticky bits (sudo 4111 is recorded as 0111,
+# /tmp 1777 as 0777), and it puts no xattr on each layer's diff directory
+# itself, which is the one fuse-overlayfs checks to decide whether to read the
+# layer's xattrs at all. So users saw every file as 0755, /tmp unwritable and
+# sudo broken. Rewrite them from the real owners and modes in the image's
+# layer tars (matched to the store's layers by diff digest). Also repairs
+# layers an earlier install loaded; changes nothing where they're right.
+if [[ "$USE_FUSE" -eq 1 ]]; then
+    step "Repairing the store's owner/mode xattrs (podman 4.x drops setuid bits)"
+    "$PY" - "$STORE" "$IMAGE_TAR" <<'EOF_PY' || die "couldn't repair the xattrs in $STORE"
+import gzip, hashlib, json, os, stat, sys, tarfile
+
+XATTR = "user.containers.override_stat"
+store, archive = sys.argv[1], sys.argv[2]
+
+
+class HashingReader:
+    def __init__(self, f):
+        self.f, self.h = f, hashlib.sha256()
+
+    def read(self, n=-1):
+        b = self.f.read(n)
+        self.h.update(b)
+        return b
+
+
+def read_layer(stream):
+    """{path in layer: (uid, gid, mode)} and the diff digest of a layer tar."""
+    hr = HashingReader(stream)
+    entries = {}
+    with tarfile.open(fileobj=hr, mode="r|") as t:
+        for m in t:
+            name = os.path.normpath(m.name).lstrip("/")
+            name = "" if name == "." else name
+            if os.path.basename(name).startswith(".wh.") or m.issym():
+                continue
+            if m.islnk():               # same inode as its target: same values
+                target = os.path.normpath(m.linkname).lstrip("/")
+                if target in entries:
+                    entries[name] = entries[target]
+                continue
+            entries[name] = (m.uid, m.gid, m.mode & 0o7777)
+    while hr.read(1 << 20):
+        pass
+    return entries, "sha256:" + hr.h.hexdigest()
+
+
+def fix_layer(diff, entries):
+    fixed = 0
+    for dirpath, _, filenames in os.walk(diff):
+        for path in [dirpath] + [os.path.join(dirpath, n) for n in filenames]:
+            st = os.lstat(path)
+            if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                continue                # symlinks etc. can't have user xattrs
+            rel = os.path.relpath(path, diff)
+            # Not in the tar (e.g. the layer root): root-owned, mode as on disk.
+            uid, gid, mode = entries.get("" if rel == "." else rel,
+                                         (0, 0, stat.S_IMODE(st.st_mode)))
+            try:
+                old = os.getxattr(path, XATTR, follow_symlinks=False).decode()
+            except OSError:
+                old = ""
+            # Keep any fields after uid:gid:mode (newer podman adds more).
+            new = ":".join([str(uid), str(gid), "0%o" % mode] + old.split(":")[3:])
+            if new != old:
+                os.setxattr(path, XATTR, new.encode(), follow_symlinks=False)
+                fixed += 1
+    return fixed
+
+
+with open(os.path.join(store, "overlay-layers", "layers.json")) as f:
+    layer_ids = {l["diff-digest"]: l["id"] for l in json.load(f) if l.get("diff-digest")}
+layers = fixed = 0
+opener = gzip.open if archive.endswith(".gz") else open
+with opener(archive, "rb") as raw, tarfile.open(fileobj=raw, mode="r|") as outer:
+    for m in outer:
+        if not (m.isfile() and m.name.endswith(".tar")):
+            continue
+        try:
+            entries, digest = read_layer(outer.extractfile(m))
+        except tarfile.TarError:
+            continue                    # not an uncompressed layer tar
+        if digest in layer_ids:
+            fixed += fix_layer(os.path.join(store, "overlay", layer_ids[digest], "diff"), entries)
+            layers += 1
+if layers == 0:
+    sys.exit("none of the image's layers were found in " + store)
+print("Checked %d layers; fixed %d xattrs." % (layers, fixed))
+EOF_PY
+fi
 chmod -R a+rX "$STORE"
 echo "Made $STORE world-readable."
 

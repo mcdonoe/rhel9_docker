@@ -110,6 +110,16 @@ Why the store is set up this way:
   it isn't set in `storage.conf`. If the installer finds a store made
   without it (by an older installer), it empties the store and loads the
   image again. Needs podman 4.0 or later (RHEL 8.6+).
+  Podman 4.x (RHEL 8) writes those attributes without the setuid, setgid
+  and sticky bits, and leaves them off each layer's top directory, so
+  fuse-overlayfs ignores them all (`/tmp` unwritable, `sudo` broken). After
+  loading, the installer rewrites them from the image's own layer files.
+  Re-running a current installer repairs an existing store in place. On
+  RHEL 8, fuse-overlayfs (before 1.14) also loses them when a container
+  first writes into a directory. The image's entrypoint compensates for the
+  directories that matters for (`/tmp`, `/var/tmp`, `/etc/sudoers.d`).
+  Others that root first writes into during a session show as owned by
+  `nobody`, which is cosmetic.
 - **Users' own `~/.config/containers/storage.conf`** replaces the system
   file, because podman doesn't merge them. Anyone listed in step 6 must add
   the store to `additionalimagestores` (and the same `mount_program`) in

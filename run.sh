@@ -161,7 +161,7 @@ check() {
     fi
     echo "starting a test container..."
     t0=$SECONDS
-    if ! out="$("$ENGINE" "${args[@]}" "$IMAGE_NAME" bash -lc 'echo "uid=$(id -u)"; sudo -n true 2>/dev/null && echo sudo=ok; echo "sudostat=$(stat -c "%a %u" /usr/bin/sudo)"; g++ --version | head -1' 2>&1)"; then
+    if ! out="$("$ENGINE" "${args[@]}" "$IMAGE_NAME" bash -lc 'echo "uid=$(id -u)"; sudo -n true 2>/dev/null && echo sudo=ok; echo "sudostat=$(stat -c "%a %u" /usr/bin/sudo)"; f=$(mktemp /tmp/check.XXXXXX 2>/dev/null) && g=$(mktemp /tmp/check.XXXXXX 2>/dev/null) && rm -f "$f" "$g" && echo tmp=ok; echo "tmpstat=$(stat -c "%a %u" /tmp)"; g++ --version | head -1' 2>&1)"; then
         echo "PROBLEM: the container failed:"; echo "$out" | sed 's/^/  /'
         return 1
     fi
@@ -176,18 +176,37 @@ check() {
             || { echo "PROBLEM: sudo doesn't work inside ($(sed -n 's/^sudostat=//p' <<<"$out" | awk '{print "/usr/bin/sudo is mode "$1", owner uid "$2}'))."
                  # The store is loaded with force_mask=shared: every file is
                  # 0755 on disk, its real owner and mode in an override_stat
-                 # xattr that fuse-overlayfs must apply. sudo showing 755 means
-                 # that xattr isn't being applied (so /tmp is 755 too); 4755
-                 # owned by nobody means the store predates force_mask.
-                 if grep -q '^sudostat=755 ' <<<"$out"; then
-                     echo "  The store was loaded with force_mask, but this host's fuse-overlayfs"
-                     echo "  isn't applying its owner/mode xattrs (so /tmp is 0755 too)."
-                     echo "  Report this host's: rpm -q fuse-overlayfs podman containers-common"
-                 else
-                     echo "  If the image is in a shared store, it was probably loaded without"
-                     echo "  force_mask: an admin re-runs the current install-shared.sh (INSTALL.md)."
-                 fi
+                 # xattr that fuse-overlayfs applies. sudo without its setuid
+                 # bit (755, or 111) means those xattrs are as podman 4.x
+                 # wrote them, unrepaired (so /tmp is unwritable too); 4111
+                 # owned by nobody means the store predates force_mask; 4111
+                 # owned by root means sudo itself is fine, but an older
+                 # entrypoint left /etc/sudoers.d owned by nobody (RHEL 8).
+                 case "$(sed -n 's/^sudostat=//p' <<<"$out")" in
+                     [0-7][0-7][0-7]" "*)
+                         echo "  The shared store's owner/mode xattrs were never repaired (podman 4.x"
+                         echo "  loads them without setuid bits), so /tmp isn't writable either."
+                         echo "  An admin re-runs the current install-shared.sh (INSTALL.md)." ;;
+                     *" 0")
+                         echo "  sudo itself is intact. With a shared store on RHEL 8, the image predates"
+                         echo "  its entrypoint's fix for RHEL 8's fuse-overlayfs (sudo then says"
+                         echo "  /etc/sudoers.d is owned by uid 65534): install a package built from"
+                         echo "  the current repo." ;;
+                     *)
+                         echo "  If the image is in a shared store, it was probably loaded without"
+                         echo "  force_mask: an admin re-runs the current install-shared.sh (INSTALL.md)." ;;
+                 esac
                  problems=1; }
+    fi
+    if grep -qx tmp=ok <<<"$out"; then
+        echo "ok: /tmp is writable inside"
+    else
+        echo "PROBLEM: /tmp isn't writable inside ($(sed -n 's/^tmpstat=//p' <<<"$out" | awk '{print "mode "$1", owner uid "$2}'); it should be"
+        echo "  1777, owner 0). Builds and tests that use temporary files fail. If sudo is"
+        echo "  also broken, fix that first (above). Otherwise, with a shared store on RHEL 8,"
+        echo "  the image predates its entrypoint's fix for RHEL 8's fuse-overlayfs: install"
+        echo "  a package built from the current repo."
+        problems=1
     fi
     if (( secs > 30 )); then
         echo "PROBLEM: the container took ${secs}s to start. Podman was probably making"

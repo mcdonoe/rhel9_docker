@@ -246,7 +246,12 @@ ls ~/.config/containers/storage.conf          # should not exist (it would repla
   current `install-shared.sh` as root. It sets `mount_program` in
   `/etc/containers/storage.conf`, and if the store was loaded without
   `force_mask` it empties it and loads the image again (everyone must be
-  out of `rhel9-dev` first). To run just the new script from an older
+  out of `rhel9-dev` first). It also repairs the store's owner/mode
+  xattrs, which podman 4.x (RHEL 8) writes without setuid bits.
+- **`--check` says `/tmp isn't writable inside`** (or sudo fails while
+  `/usr/bin/sudo` is mode 4111 owner 0): on RHEL 8, the image is older than
+  its entrypoint's fix for RHEL 8's fuse-overlayfs. Install a package built
+  from the current repo. To run just the new script from an older
   unpacked package: copy it in over the old one and add `--skip-checksums`.
 - **No subuid/subgid line:** add them as in E1, then run
   `podman system migrate` as that user.
@@ -474,7 +479,9 @@ every project's `@playwright/test` to match at the same time.
 | --- | --- | --- |
 | `creating container storage: error during chown: storage-chown-by-maps: lchown ...: operation not permitted` when starting `rhel9-dev` | podman isn't using fuse-overlayfs with the shared store (installers before Nov 2026 didn't set it on RHEL8), and/or the image has files owned by the build user (images before Nov 2026: `/opt/omp`) | Install a current package with `./install-shared.sh` (it sets `mount_program`), then `rhel9-dev --check`. See [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
 | `no space left on device` while `install-shared.sh` loads the image | podman unpacks the image into `/var/tmp` first | Re-run with `--tmpdir /DATA/tmp` (any folder with room for the full image) |
-| `--check`: `PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)` | The shared store was loaded without `force_mask = "shared"`, so rootless users see its root-owned files (`/usr/bin/sudo` included) as owned by nobody | Re-run the current `install-shared.sh` as root; see [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
+| `--check`: `PROBLEM: sudo doesn't work inside (/usr/bin/sudo is mode 755 ...)`, or inside the container `/tmp` is `drwxr-xr-x` and sudo says `must be owned by uid 0 and have the setuid bit set` | The shared store's owner/mode xattrs are as podman 4.x (RHEL 8) writes them with `force_mask`: no setuid or sticky bits, and none on the layer roots, so fuse-overlayfs ignores them all | Re-run the current `install-shared.sh` as root (it repairs them in place, no reload); see [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
+| `--check`: `PROBLEM: sudo doesn't work inside (/usr/bin/sudo is mode 4111, owner uid 0)`, sudo says `/etc/sudoers.d is owned by uid 65534`, or `/tmp` turns `drwxr-xr-x nobody nobody` after the first file is created in it (Java tests: `@TempDir`, Mockito self-attach fail) | RHEL 8's fuse-overlayfs (before 1.14) copies a directory into the container's writable layer with its owner and mode on disk in the shared store (nobody, 0755), and the image's entrypoint predates the fix for that | Build a package from the current repo and install it; see [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
+| `--check`: `PROBLEM: sudo doesn't work inside (/usr/bin/sudo is mode 4111, owner uid 65534)` | The shared store was loaded without `force_mask = "shared"`, so rootless users see its root-owned files (`/usr/bin/sudo` included) as owned by nobody | Re-run the current `install-shared.sh` as root; see [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
 | `can't read maps/ (SELinux? ...)` during a build | The engine was run by hand without `--security-opt label=disable` | Build with `./build.sh` |
 | `404` from `pnpm install` / `pnpm add` | The package (or that version) isn't vendored | Use a vendored version, or add it (H3). On a connected machine you can use `npm_config_registry=https://registry.npmjs.org/ ./run.sh ...` |
 | omp_distro's build fails fetching npm packages | It needs the public registry, not the vendored one | Prefix with `npm_config_registry=https://registry.npmjs.org/` (C1) |

@@ -32,6 +32,11 @@
 #                              registry (omp_distro's build.sh does):
 #                                npm_config_registry=https://registry.npmjs.org/ ./run.sh ...
 #                              (pnpm_config_registry is passed through too)
+#   RHEL9DEV_GPU=none          don't give the container the host's GPUs
+#   RHEL9DEV_CUDA=host|DIR     use the host's CUDA toolkit (/usr/local/cuda,
+#                              or DIR) instead of the image's, if it's newer
+#                              than the image's; otherwise says so and uses
+#                              the image's
 #
 # What it sets up, compared with a bare `docker run -it rhel9-dev bash`:
 #   - your host UID/GID inside the container (see entrypoint.sh), so files
@@ -46,6 +51,15 @@
 #     doesn't get it. It still has all of /workspace and the full network.
 #   - /opt/rcce_coe from the host, read-only at the same path (skipped if
 #     the host has none).
+#   - the host's NVIDIA GPUs, if it has any: their devices, and the
+#     driver's own libraries (libcuda, NVML, ...) and nvidia-smi read-only
+#     under /opt/host-nvidia, put on LD_LIBRARY_PATH and PATH by
+#     /etc/profile.d/20-cuda.sh. So CUDA programs run on the GPU, if the
+#     host's driver supports the image's CUDA 12 (R525+; it warns if not).
+#     Needs nothing else on the host (no NVIDIA container toolkit).
+#   - with RHEL9DEV_CUDA=host (or =DIR), the host's CUDA toolkit instead of
+#     the image's, if it's newer: read-only at /opt/host-cuda, put on PATH
+#     and LD_LIBRARY_PATH ahead of the image's by /etc/profile.d/20-cuda.sh.
 #   - a login shell, so /etc/profile.d sets PATH, GOTOOLCHAIN and friends
 #     the same way `su -` would.
 #   - the host's network (--network host), so a dev server you start in the
@@ -289,6 +303,57 @@ for d in "${HOST_RO_DIRS[@]}"; do
         echo "note: $d not found on this host; not mounting it" >&2
     fi
 done
+
+# The host's CUDA toolkit instead of the image's, when asked (see the
+# header) and only if it's newer: compare nvcc versions (V12.2.128 style),
+# the image's from its rhel9-dev.cuda.nvcc label. An image without the label
+# has no CUDA of its own, so any host toolkit is newer.
+if [[ -n "${RHEL9DEV_CUDA:-}" ]]; then
+    CUDA_DIR="$RHEL9DEV_CUDA"
+    [[ "$CUDA_DIR" == host ]] && CUDA_DIR=/usr/local/cuda
+    if [[ ! -x "$CUDA_DIR/bin/nvcc" ]]; then
+        echo "note: $CUDA_DIR has no bin/nvcc, so it isn't a CUDA toolkit; using the image's CUDA" >&2
+    else
+        host_cuda="$("$CUDA_DIR/bin/nvcc" --version 2>/dev/null | sed -n 's/.*, V\([0-9][0-9.]*\)$/\1/p')"
+        image_cuda="$("$ENGINE" image inspect "$IMAGE_NAME" \
+            --format '{{index .Config.Labels "rhel9-dev.cuda.nvcc"}}' 2>/dev/null || true)"
+        [[ "$image_cuda" == "<no value>" ]] && image_cuda=""
+        if [[ -z "$host_cuda" ]]; then
+            echo "note: can't tell $CUDA_DIR's CUDA version from its nvcc; using the image's CUDA" >&2
+        elif [[ -n "$image_cuda" && "$(printf '%s\n%s\n' "$host_cuda" "$image_cuda" | sort -V | tail -1)" == "$image_cuda" ]]; then
+            echo "note: the host's CUDA (nvcc $host_cuda) isn't newer than the image's ($image_cuda); using the image's" >&2
+        else
+            echo "note: using the host's CUDA (nvcc $host_cuda, from $CUDA_DIR) instead of the image's${image_cuda:+ ($image_cuda)}" >&2
+            ARGS+=(-v "$(readlink -f "$CUDA_DIR"):/opt/host-cuda:ro" -e RHEL9DEV_CUDA_HOME=/opt/host-cuda)
+        fi
+    fi
+fi
+
+# The host's NVIDIA GPUs (see the header). The driver's user-space libraries
+# must be the host's own (they talk to its kernel module), so mount each one
+# found in the host's loader cache by its soname; the image has only the
+# link-time stub. RHEL and Ubuntu builds of them both work in the container.
+if [[ "${RHEL9DEV_GPU:-}" != none && -c /dev/nvidiactl ]]; then
+    for dev in /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset /dev/nvidia[0-9]*; do
+        [[ -c "$dev" ]] && ARGS+=(--device "$dev")
+    done
+    LDCONFIG="$(command -v ldconfig || echo /sbin/ldconfig)"
+    while read -r soname path; do
+        real="$(readlink -f "$path")" && [[ -f "$real" ]] \
+            && ARGS+=(-v "$real:/opt/host-nvidia/lib/$soname:ro")
+    done < <("$LDCONFIG" -p 2>/dev/null | awk '/x86-64/ && $1 ~ /^lib(cuda|cudadebugger|nvidia-(ml|ptxjitcompiler|nvvm|gpucomp|cfg))\.so\./ {print $1, $NF}' | sort -u -k1,1)
+    if NVSMI="$(command -v nvidia-smi)"; then
+        ARGS+=(-v "$(readlink -f "$NVSMI"):/opt/host-nvidia/bin/nvidia-smi:ro")
+        # The newest CUDA the driver supports, e.g. "11.4". CUDA 12.x
+        # programs need 12.0 or later (driver R525+).
+        driver_cuda="$("$NVSMI" 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9][0-9.]*\).*/\1/p' | head -1)"
+        if [[ -n "$driver_cuda" && "${driver_cuda%%.*}" -lt 12 ]]; then
+            echo "note: this host's NVIDIA driver supports CUDA up to $driver_cuda; the image's CUDA 12" >&2
+            echo "  programs build here but won't run on the GPU (needs driver R525 or newer)" >&2
+        fi
+    fi
+    ARGS+=(-e RHEL9DEV_NVIDIA=/opt/host-nvidia)
+fi
 
 # Rootless docker maps container root to you and every other container UID to
 # a subordinate UID, so only root inside writes /workspace files as you.

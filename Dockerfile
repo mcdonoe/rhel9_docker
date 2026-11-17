@@ -150,6 +150,12 @@ RUN --mount=type=secret,id=rh_username \
         autoconf automake libtool pkgconf-pkg-config \
         # --- compression libs for Boost.Iostreams (Boost is built below) ---
         bzip2 bzip2-devel zlib-devel xz-devel libzstd-devel \
+        # --- C/C++ libraries with headers and pkg-config files: ZeroMQ 4.3
+        #     and CZMQ 4.2 (EPEL; pull in libsodium, openpgm, krb5 -devel),
+        #     OpenSSL 3, log4cxx 1.x (EPEL). zlib-devel is above; Eigen 3
+        #     is installed from source below (RHEL has it only in the
+        #     subscription-only CodeReady Builder repo) ---
+        zeromq-devel czmq-devel openssl-devel log4cxx-devel \
         # --- Python ---
         python3.11 python3.11-devel python3.11-pip \
         python3.12 python3.12-devel python3.12-pip \
@@ -344,6 +350,92 @@ RUN set -eux; \
     PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig pkg-config --modversion protobuf | grep -qx "${PROTOBUF_VERSION}"
 
 # ---------------------------------------------------------------------------
+# Eigen 3 (header-only C++ linear algebra), from the official source
+# release, checksum pinned. RHEL 9 ships eigen3-devel only in CodeReady
+# Builder, which needs a subscription, and this build must also work from
+# UBI + EPEL alone; same version as RHEL's (3.4.0).
+#
+# Installed under /usr/local like Boost: headers in include/eigen3,
+# pkg-config file in lib64/pkgconfig (pkg-config --cflags eigen3), and
+# CMake's find_package(Eigen3 3.4 REQUIRED NO_MODULE) with target
+# Eigen3::Eigen. Its CMake setup wants a C++ compiler even though nothing
+# is compiled. Bump EIGEN_VERSION/EIGEN_SHA256 together.
+# ---------------------------------------------------------------------------
+ARG EIGEN_VERSION=3.4.0
+ARG EIGEN_SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+
+RUN set -eux; \
+    curl -fsSL -o /tmp/eigen.tar.gz \
+        "https://gitlab.com/libeigen/eigen/-/archive/${EIGEN_VERSION}/eigen-${EIGEN_VERSION}.tar.gz"; \
+    echo "${EIGEN_SHA256}  /tmp/eigen.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/eigen.tar.gz -C /tmp --no-same-owner; \
+    rm /tmp/eigen.tar.gz; \
+    set +u; source /opt/rh/gcc-toolset-12/enable; set -u; \
+    cmake -S "/tmp/eigen-${EIGEN_VERSION}" -B /tmp/eigen-build \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DPKGCONFIG_INSTALL_DIR=/usr/local/lib64/pkgconfig \
+        -DBUILD_TESTING=OFF; \
+    cmake --install /tmp/eigen-build; \
+    rm -rf "/tmp/eigen-${EIGEN_VERSION}" /tmp/eigen-build; \
+    PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig pkg-config --modversion eigen3 | grep -qx "${EIGEN_VERSION}"
+
+# ---------------------------------------------------------------------------
+# CUDA toolkit 12.2.1 (nvcc V12.2.128), from NVIDIA's RHEL 9 repo, every
+# package pinned to the version that release shipped (the repo's
+# meta-packages only ask for "at least", so they'd drift to later updates).
+# Matches the hosts' CUDA (dipper: 12.2, V12.2.128); run.sh can use a newer
+# toolkit from the host instead (RHEL9DEV_CUDA=host, see run.sh).
+#
+# The common set: nvcc and friends, cuda-gdb, the runtime, Thrust/CUB
+# (cccl), the driver API stub (libcuda.so, to link against; the real one
+# comes with the host's driver), NVRTC, NVTX, the profiler API, and cuBLAS,
+# cuFFT, cuRAND, cuSOLVER and cuSPARSE (+ nvJitLink, which they need). Not
+# NPP, nvJPEG, cuFile, OpenCL or the Nsight tools: add them below (versions
+# from `dnf repoquery --requires cuda-libraries-devel-12-2-12.2.1`).
+#
+# The libraries' static archives (~2 GB, cuBLASLt alone 0.7 GB) are deleted;
+# projects link the shared ones. libcudart_static.a (nvcc's default runtime)
+# and libcudadevrt.a (separate compilation) stay.
+#
+# Installs to /usr/local/cuda-12.2, with /usr/local/cuda pointing at it and
+# its lib directory in /etc/ld.so.conf.d, so binaries find the libraries
+# without LD_LIBRARY_PATH; /etc/profile.d/20-cuda.sh puts nvcc on PATH. CUDA
+# 12.2 supports gcc up to 12, i.e. the default gcc-toolset-12 (and RHEL's
+# gcc 11), not gcc-toolset-14/15. Running kernels needs the GPU and the
+# host's driver (R525 or newer for CUDA 12) in the container; compiling
+# doesn't. NVIDIA's repo stays configured but disabled. Bump the versions
+# together, from that repoquery.
+# ---------------------------------------------------------------------------
+ARG CUDA_VERSION=12.2.1
+ARG CUDA_NVCC_VERSION=12.2.128
+LABEL rhel9-dev.cuda.version="${CUDA_VERSION}" \
+      rhel9-dev.cuda.nvcc="${CUDA_NVCC_VERSION}"
+
+RUN set -eux; \
+    curl -fsSL -o /etc/yum.repos.d/cuda-rhel9.repo \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo; \
+    C="${CUDA_NVCC_VERSION}"; \
+    dnf install -y --setopt=install_weak_deps=0 \
+        cuda-nvcc-12-2-$C cuda-cuobjdump-12-2-$C cuda-cuxxfilt-12-2-$C \
+        cuda-nvprune-12-2-$C cuda-gdb-12-2-$C \
+        cuda-cudart-12-2-$C cuda-cudart-devel-12-2-$C cuda-cccl-12-2-$C \
+        cuda-driver-devel-12-2-$C \
+        cuda-nvrtc-12-2-$C cuda-nvrtc-devel-12-2-$C \
+        cuda-nvtx-12-2-$C cuda-profiler-api-12-2-$C \
+        libnvjitlink-12-2-$C libnvjitlink-devel-12-2-$C \
+        libcublas-12-2-12.2.4.5 libcublas-devel-12-2-12.2.4.5 \
+        libcufft-12-2-11.0.8.91 libcufft-devel-12-2-11.0.8.91 \
+        libcurand-12-2-10.3.3.129 libcurand-devel-12-2-10.3.3.129 \
+        libcusolver-12-2-11.5.1.129 libcusolver-devel-12-2-11.5.1.129 \
+        libcusparse-12-2-12.1.2.129 libcusparse-devel-12-2-12.1.2.129; \
+    find /usr/local/cuda-12.2/targets/x86_64-linux/lib -name '*_static*.a' \
+        ! -name libcudart_static.a -delete; \
+    sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/cuda-rhel9.repo; \
+    dnf clean all; \
+    ldconfig; \
+    /usr/local/cuda/bin/nvcc --version | grep -q ", V${CUDA_NVCC_VERSION}\$"
+
+# ---------------------------------------------------------------------------
 # Go — official upstream tarball into /usr/local/go, checksum pinned.
 #
 # omp_distro's build.sh compiles github-mcp-server from patched source, whose
@@ -418,6 +510,36 @@ case ":${PKG_CONFIG_PATH:-}:" in *":/usr/local/lib64/pkgconfig:"*) ;;
     *) export PKG_CONFIG_PATH="/usr/local/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" ;; esac
 unset d
 export PATH
+EOF_PROFILE
+
+# CUDA for login shells: the image's toolkit (/usr/local/cuda), or the
+# host's newer one, which run.sh mounts at /opt/host-cuda and names in
+# RHEL9DEV_CUDA_HOME when asked to (RHEL9DEV_CUDA=host). The image's
+# libraries are in the loader cache; a host toolkit's go first on
+# LD_LIBRARY_PATH so they win.
+# Also the host's GPU driver libraries, which run.sh mounts under
+# /opt/host-nvidia (RHEL9DEV_NVIDIA) on a host with NVIDIA GPUs.
+RUN cat > /etc/profile.d/20-cuda.sh <<'EOF_PROFILE'
+CUDA_HOME="${RHEL9DEV_CUDA_HOME:-/usr/local/cuda}"
+if [ -x "$CUDA_HOME/bin/nvcc" ]; then
+    CUDA_PATH="$CUDA_HOME"
+    export CUDA_HOME CUDA_PATH
+    case ":$PATH:" in *":$CUDA_HOME/bin:"*) ;; *) PATH="$CUDA_HOME/bin:$PATH" ;; esac
+    export PATH
+    if [ -n "${RHEL9DEV_CUDA_HOME:-}" ]; then
+        case ":${LD_LIBRARY_PATH:-}:" in *":$CUDA_HOME/lib64:"*) ;;
+            *) export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;; esac
+    fi
+else
+    unset CUDA_HOME
+fi
+# The host's NVIDIA driver libraries and nvidia-smi, when run.sh mounts them.
+if [ -n "${RHEL9DEV_NVIDIA:-}" ]; then
+    case ":${LD_LIBRARY_PATH:-}:" in *":$RHEL9DEV_NVIDIA/lib:"*) ;;
+        *) export LD_LIBRARY_PATH="$RHEL9DEV_NVIDIA/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;; esac
+    case ":$PATH:" in *":$RHEL9DEV_NVIDIA/bin:"*) ;; *) PATH="$PATH:$RHEL9DEV_NVIDIA/bin" ;; esac
+    export PATH
+fi
 EOF_PROFILE
 
 # Bind-mounting host repos (e.g. -v ~/GIT_REPOS:/workspace) trips git's

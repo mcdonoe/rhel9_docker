@@ -3,7 +3,9 @@
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
 gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
 OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium,
-Firefox), Boost 1.81, Protocol Buffers 3.15.6 (protoc + C++), uv, vim, btop,
+Firefox), Boost 1.81, Protocol Buffers 3.15.6 (protoc + C++), Eigen 3.4,
+ZeroMQ 4.3 + CZMQ 4.2, OpenSSL 3, zlib and log4cxx 1.x (all with headers),
+CUDA 12.2 (nvcc + the common libraries), uv, vim, btop,
 the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
 plus an opt-in dnsmasq DHCP server (see below).
 
@@ -263,6 +265,42 @@ else without touching systemd, to review it first.
   `com.google.protobuf:protobuf-java:3.15.6` in the project's Maven
   repository). This is separate from projects that bring their own protoc
   through Maven or buf, such as `web_test` (protobuf 4.x).
+- **Eigen 3.4.0**: header-only, from the official source release
+  (checksum-pinned via `EIGEN_VERSION`/`EIGEN_SHA256`; RHEL has it only in
+  the subscription-only CodeReady Builder repo), into `/usr/local` like
+  Boost. `pkg-config --cflags eigen3` works, and so does CMake's
+  `find_package(Eigen3 3.4 REQUIRED NO_MODULE)` with target `Eigen3::Eigen`.
+- **ZeroMQ 4.3, CZMQ 4.2, OpenSSL 3, zlib, log4cxx 1.x**: RHEL/EPEL
+  `-devel` packages, so the headers (`<zmq.h>`, `<czmq.h>`,
+  `<openssl/ssl.h>`, `<zlib.h>`, `<log4cxx/logger.h>`) and `-lzmq`,
+  `-lczmq`, `-lssl -lcrypto`, `-lz`, `-llog4cxx` work as is, as does
+  `pkg-config --cflags --libs libzmq libczmq openssl zlib liblog4cxx`.
+  Java bindings (jzmq, JeroMQ) come from the project.
+- **CUDA 12.2.1** (nvcc `V12.2.128`, the hosts' version): from NVIDIA's
+  RHEL 9 repo, each package pinned, in `/usr/local/cuda-12.2` with
+  `/usr/local/cuda` pointing at it. The common set: `nvcc` and its tools,
+  `cuda-gdb`, the runtime, Thrust/CUB, NVRTC, NVTX, the driver API stub
+  (`libcuda.so` to link against), and cuBLAS, cuFFT, cuRAND, cuSOLVER and
+  cuSPARSE, shared libraries only (their static archives are left out to
+  save ~2 GB; `libcudart_static.a`, nvcc's default, stays). Not NPP,
+  nvJPEG, cuFile, OpenCL or Nsight (see the Dockerfile to add them).
+  `nvcc` is on `PATH`, `CUDA_HOME` is set, and the libraries are in the
+  loader cache, so binaries run without `LD_LIBRARY_PATH`. Notes:
+  - CUDA 12.2 supports gcc up to 12: the default gcc-toolset-12 (or
+    `-ccbin /usr/bin/gcc`, RHEL's gcc 11), not gcc-toolset-14/15.
+  - **A newer toolkit from the host:** `RHEL9DEV_CUDA=host ./run.sh`
+    (or `RHEL9DEV_CUDA=/usr/local/cuda-12.6 ./run.sh`) mounts the host's
+    toolkit read-only at `/opt/host-cuda` and puts it ahead of the image's
+    on `PATH` and `LD_LIBRARY_PATH`, if its nvcc is newer than the image's.
+    If it isn't, run.sh says so and uses the image's.
+  - **The GPU:** on a host with NVIDIA GPUs, `run.sh` passes them in, with
+    the host driver's own libraries (libcuda, NVML, ...) and `nvidia-smi`
+    mounted read-only under `/opt/host-nvidia` and put on
+    `LD_LIBRARY_PATH`/`PATH`, so `nvidia-smi` works and CUDA programs run
+    on the GPU. Nothing else is needed on the host (no NVIDIA container
+    toolkit). The host's driver must support CUDA 12 (R525 or newer);
+    run.sh warns when it doesn't, and programs then build but won't run on
+    the GPU. `RHEL9DEV_GPU=none ./run.sh` leaves the GPUs out.
 - **Web development**: Node.js 22 with npm, pnpm, Maven 3.9 and the JDK's
   `jmods` (for `jlink`/`jpackage`), matching the toolchain in the
   air-gapped build tooling guide:

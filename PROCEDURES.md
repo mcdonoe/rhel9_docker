@@ -206,6 +206,16 @@ cd rhel9-dev-<date>
 This loads the image once into a shared store that every user reads, and
 installs the `rhel9-dev` command. It prints each change it makes.
 
+**Short on space in `/var/tmp`?** Loading unpacks the whole image (several
+GB) into a temporary folder first, `/var/tmp` by default. Point it at a
+bigger filesystem with `--tmpdir`:
+
+```
+./install-shared.sh --tmpdir /DATA/tmp
+```
+
+The same switch works with `--runtime` (G1).
+
 ### E3. Each user, once (as yourself, not sudo)
 
 ```
@@ -334,7 +344,8 @@ cd rhel9-runtime-<date>
 ```
 
 It loads the image into root's podman storage (separate from the shared
-store in E) and installs the installer to `/opt/rhel9-runtime/`.
+store in E) and installs the installer to `/opt/rhel9-runtime/`. Add
+`--tmpdir /DATA/tmp` if `/var/tmp` is short of space (about 1 GB needed).
 
 **Check:** it prints the image's Java version (21).
 
@@ -462,6 +473,7 @@ every project's `@playwright/test` to match at the same time.
 | You see | Cause | Fix |
 | --- | --- | --- |
 | `creating container storage: error during chown: storage-chown-by-maps: lchown ...: operation not permitted` when starting `rhel9-dev` | podman isn't using fuse-overlayfs with the shared store (installers before Nov 2026 didn't set it on RHEL8), and/or the image has files owned by the build user (images before Nov 2026: `/opt/omp`) | Install a current package with `./install-shared.sh` (it sets `mount_program`), then `rhel9-dev --check`. See [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
+| `no space left on device` while `install-shared.sh` loads the image | podman unpacks the image into `/var/tmp` first | Re-run with `--tmpdir /DATA/tmp` (any folder with room for the full image) |
 | `--check`: `PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)` | The shared store was loaded without `force_mask = "shared"`, so rootless users see its root-owned files (`/usr/bin/sudo` included) as owned by nobody | Re-run the current `install-shared.sh` as root; see [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
 | `can't read maps/ (SELinux? ...)` during a build | The engine was run by hand without `--security-opt label=disable` | Build with `./build.sh` |
 | `404` from `pnpm install` / `pnpm add` | The package (or that version) isn't vendored | Use a vendored version, or add it (H3). On a connected machine you can use `npm_config_registry=https://registry.npmjs.org/ ./run.sh ...` |
@@ -491,6 +503,7 @@ npm_config_registry=https://registry.npmjs.org/ ./run.sh 'cd omp_distro && ./bui
 
 # --- air-gapped machine, as root --------------------------------------------
 ./install-shared.sh                     # in the unpacked rhel9-dev package
+                                        #   (add --tmpdir /DATA/tmp if /var/tmp is small)
 ./install-shared.sh --runtime           # in the unpacked rhel9-runtime package
 /opt/rhel9-runtime/install-shared.sh --app NAME \
     --classpath /OUTPUT/web/output_libs:/OUTPUT/web/cots_libs \

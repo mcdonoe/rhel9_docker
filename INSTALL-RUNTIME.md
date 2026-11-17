@@ -44,6 +44,9 @@ tar -xf rhel9-runtime-<date>.tar && cd rhel9-runtime-<date>
 ./install-shared.sh --runtime
 ```
 
+If `/var/tmp` is short of space, add `--tmpdir /DATA/tmp` (or any roomy
+folder): podman unpacks the image there while loading it, about 1 GB.
+
 It checks the package against `SHA256SUMS`, loads the image into root's
 podman storage (system services run as root's podman), prints the image's
 Java version, and installs `install-shared.sh` and these docs to

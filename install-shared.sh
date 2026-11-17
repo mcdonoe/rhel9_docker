@@ -20,9 +20,12 @@
 #   --no-fuse-overlayfs
 #                     don't set mount_program in storage.conf (see below)
 #   --skip-checksums  don't check SHA256SUMS first
+#   --tmpdir DIR      where podman unpacks the image while loading it: about
+#                     the image's full size (several GB for rhel9-dev).
+#                     Default $TMPDIR, else /var/tmp. E.g. --tmpdir /DATA/tmp
 #
 # Runtime image (rhel9-runtime), for system services:
-#   sudo ./install-shared.sh --runtime [--prefix DIR] [--skip-checksums]
+#   sudo ./install-shared.sh --runtime [--prefix DIR] [--skip-checksums] [--tmpdir DIR]
 #     loads the image into root's podman storage (services run as root's
 #     podman) and installs this script to PREFIX (default /opt/rhel9-runtime).
 #   sudo /opt/rhel9-runtime/install-shared.sh --app NAME \
@@ -86,6 +89,7 @@ STORAGE_CONF=/etc/containers/storage.conf
 USE_FUSE=auto
 PRUNE=0
 CHECKSUMS=1
+LOAD_TMPDIR=""
 RUNTIME=0
 # --app / --remove-app
 APP=""
@@ -109,6 +113,23 @@ usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0";
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
 
+# podman load unpacks the compressed image into a temporary file first, in
+# $TMPDIR (default /var/tmp), which needs about the image's full size. Point
+# it at --tmpdir, and say up front if there's clearly not enough room.
+set_load_tmpdir() {
+    local dir="${LOAD_TMPDIR:-${TMPDIR:-/var/tmp}}" free need
+    mkdir -p "$dir" || die "can't create $dir for temporary files"
+    [[ -w "$dir" ]] || die "$dir isn't writable"
+    export TMPDIR="$dir"
+    free=$(( $(df -Pk "$dir" | awk 'NR==2 {print $4}') / 1024 ))
+    need=$(( $(stat -c %s "$1") * 4 / 1024 / 1024 ))   # a rough upper bound
+    echo "Temporary files go in $dir ($free MB free; loading needs up to about $need MB)."
+    if (( free < need )); then
+        echo "warning: $dir may be too small. If the load fails with \"no space left on device\"," >&2
+        echo "  re-run with --tmpdir DIR on a bigger filesystem, e.g. --tmpdir /DATA/tmp" >&2
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --store)             STORE="${2:?--store needs a directory}"; shift 2 ;;
@@ -117,6 +138,7 @@ while [[ $# -gt 0 ]]; do
         --no-fuse-overlayfs) USE_FUSE=0; shift ;;
         --prune)             PRUNE=1; shift ;;
         --skip-checksums)    CHECKSUMS=0; shift ;;
+        --tmpdir)            LOAD_TMPDIR="${2:?--tmpdir needs a folder}"; shift 2 ;;
         --runtime)           RUNTIME=1; shift ;;
         --app)               APP="${2:?--app needs a name}"; RUNTIME=1; shift 2 ;;
         --remove-app)        REMOVE_APP="${2:?--remove-app needs a name}"; RUNTIME=1; shift 2 ;;
@@ -407,6 +429,7 @@ if [[ "$RUNTIME" -eq 1 ]]; then
     fi
 
     step "Loading $IMAGE_NAME into root's podman storage"
+    set_load_tmpdir "$IMAGE_TAR"
     podman load -i "$IMAGE_TAR"
     echo "Java in the image: $(podman run --rm "$IMAGE_NAME" --version 2>&1 | head -n1)"
 
@@ -526,6 +549,7 @@ fi
 step "Loading $IMAGE_NAME into $STORE (takes a few minutes)"
 mkdir -p "$STORE"
 chmod 755 "$STORE"
+set_load_tmpdir "$IMAGE_TAR"
 store_podman load -i "$IMAGE_TAR"
 chmod -R a+rX "$STORE"
 echo "Made $STORE world-readable."

@@ -73,7 +73,13 @@ It prints what it changes at each step:
 6. Lists users whose own `storage.conf` would hide the shared store.
 
 Options: `--store DIR`, `--prefix DIR`, `--bindir DIR`,
-`--no-fuse-overlayfs`, `--prune`, `--skip-checksums`; see `--help`.
+`--no-fuse-overlayfs`, `--prune`, `--skip-checksums`, `--tmpdir DIR`; see
+`--help`.
+
+**Temporary space.** While loading, podman unpacks the whole image into a
+temporary folder first: several GB, in `/var/tmp` by default. If `/var/tmp`
+is small, point it elsewhere: `./install-shared.sh --tmpdir /DATA/tmp`. The
+installer shows the free space before it starts.
 
 Why the store is set up this way:
 

@@ -310,6 +310,40 @@ RUN set -eux; \
     grep -q "define BOOST_LIB_VERSION \"${v%_0}\"" /usr/local/include/boost/version.hpp
 
 # ---------------------------------------------------------------------------
+# Protocol Buffers 3.15.6 — protoc and the C++ runtime (libprotobuf,
+# libprotobuf-lite, libprotoc), built from the official protobuf-cpp source
+# release, checksum pinned. RHEL9's own protobuf packages aren't installed,
+# so nothing clashes.
+#
+# Installed under /usr/local like Boost: protoc in bin/, headers in
+# include/google/protobuf, shared and static libs in lib64/, pkg-config
+# files (pkg-config --cflags --libs protobuf), and CMake's
+# find_package(Protobuf) finds it. Built with gcc-toolset-12. protoc also
+# generates Java, Python, etc.; the language runtimes for those come from
+# each project (e.g. protobuf-java 3.15.x from the project's Maven repo).
+# Bump PROTOBUF_VERSION/PROTOBUF_SHA256 together.
+# ---------------------------------------------------------------------------
+ARG PROTOBUF_VERSION=3.15.6
+ARG PROTOBUF_SHA256=bbdfb7455431d7d58666e8a2996d14b236718ff238eecde10646581e4c87f168
+
+RUN set -eux; \
+    curl -fsSL -o /tmp/protobuf.tar.gz \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-cpp-${PROTOBUF_VERSION}.tar.gz"; \
+    echo "${PROTOBUF_SHA256}  /tmp/protobuf.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/protobuf.tar.gz -C /tmp --no-same-owner; \
+    rm /tmp/protobuf.tar.gz; \
+    cd "/tmp/protobuf-${PROTOBUF_VERSION}"; \
+    set +u; source /opt/rh/gcc-toolset-12/enable; set -u; \
+    ./configure --quiet --prefix=/usr/local --libdir=/usr/local/lib64; \
+    make -s -j"$(nproc)"; \
+    make -s install; \
+    cd /; \
+    rm -rf "/tmp/protobuf-${PROTOBUF_VERSION}"; \
+    ldconfig; \
+    protoc --version | grep -qx "libprotoc ${PROTOBUF_VERSION}"; \
+    PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig pkg-config --modversion protobuf | grep -qx "${PROTOBUF_VERSION}"
+
+# ---------------------------------------------------------------------------
 # Go — official upstream tarball into /usr/local/go, checksum pinned.
 #
 # omp_distro's build.sh compiles github-mcp-server from patched source, whose
@@ -350,6 +384,7 @@ ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
     ANT_HOME=/opt/ant \
     GOTOOLCHAIN=local \
     PATH="/usr/local/go/bin:/opt/ant/bin:${PATH}" \
+    PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
@@ -378,6 +413,9 @@ for d in /opt/ant/bin /usr/local/go/bin; do
     case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
 done
 case ":$PATH:" in *":$HOME/go/bin:"*) ;; *) PATH="$PATH:$HOME/go/bin" ;; esac
+# pkg-config files for what's built into /usr/local (protobuf)
+case ":${PKG_CONFIG_PATH:-}:" in *":/usr/local/lib64/pkgconfig:"*) ;;
+    *) export PKG_CONFIG_PATH="/usr/local/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" ;; esac
 unset d
 export PATH
 EOF_PROFILE
@@ -412,7 +450,8 @@ RUN --mount=type=bind,source=omp-bundle,target=/mnt/omp-bundle \
     mkdir /tmp/omp; \
     tar -xzf "$1" -C /tmp/omp; \
     /tmp/omp/*/install.sh --routelm-url "$ROUTELM_URL"; \
-    rm -rf /tmp/omp
+    rm -rf /tmp/omp; \
+    chown -R root:root /opt/omp
 
 # run.sh bind-mounts the host's ~/.omp. Users set it up on the host
 # (omp-user-setup, omp-mcp-setup) against the same bundle version as this
@@ -480,6 +519,18 @@ RUN set -eux; \
 COPY --from=maps /opt/maps /opt/maps
 RUN if [ -f /opt/maps/eastern-seaboard.pmtiles ]; then \
         pmtiles show /opt/maps/eastern-seaboard.pmtiles | head -20; \
+    fi
+
+# Nothing in the image may be owned by an ordinary user's UID/GID (such as
+# the build user's, carried in by a tarball). In a shared image store those
+# IDs are real host IDs that rootless podman can't map, and container
+# creation fails with "storage-chown-by-maps: lchown ...: operation not
+# permitted". Only system accounts (below 1000) and nobody (65534) are OK.
+RUN bad="$(find / -xdev \( -uid +999 -o -gid +999 \) ! -uid 65534 ! -gid 65534 \
+              -printf '%U:%G %p\n' 2>/dev/null | head -20)"; \
+    if [ -n "$bad" ]; then \
+        echo "error: files owned by a non-system UID/GID (chown them to root):" >&2; \
+        echo "$bad" >&2; exit 1; \
     fi
 
 # No user is baked in. entrypoint.sh creates one at startup with the UID/GID

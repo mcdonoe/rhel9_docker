@@ -28,9 +28,9 @@ then each user runs `rhel9-dev --check` once, and `rhel9-dev` from then on.
 - **x86_64.** The image is amd64 only.
 - **podman:** `dnf install podman` (or `container-tools`), from the host's
   RHEL repos or install media.
-- **fuse-overlayfs, on RHEL9 or newer:** `dnf install fuse-overlayfs`. The
-  installer stops if it's needed and missing. RHEL8 doesn't need it set up
-  (see step 2 for why).
+- **fuse-overlayfs:** `dnf install fuse-overlayfs` (RHEL8 usually has it
+  already, as part of podman). The installer stops if it's missing (see
+  step 2 for why it's needed).
 - **Rootless podman for each user.** Each user needs entries in `/etc/subuid`
   and `/etc/subgid`. `useradd` adds them on RHEL8, but accounts from LDAP/IdM
   or older installs may have none:
@@ -66,7 +66,7 @@ It prints what it changes at each step:
    world-readable.
 3. Labels the store for SELinux the same way as podman's own storage.
 4. Edits `/etc/containers/storage.conf`, after backing it up. It adds the
-   store to `additionalimagestores` and, on kernels newer than RHEL8's, sets
+   store to `additionalimagestores` and sets
    `mount_program = "/usr/bin/fuse-overlayfs"`.
 5. Installs the scripts to `/opt/rhel9-dev` and links
    `/usr/local/bin/rhel9-dev` to `run.sh`.
@@ -86,14 +86,24 @@ Why the store is set up this way:
   side effect is that `/etc/shadow` is world-readable inside the container,
   where it holds no passwords.
 - **fuse-overlayfs** makes the store's root-owned files show up as root
-  inside a rootless container. Rootless podman on kernels 5.13 and newer
-  (RHEL9 and later) otherwise uses the kernel's own overlay, which can't
-  remap ownership, so podman makes each user a private, re-owned copy of
-  the whole image on first start. That takes minutes and several GB per
-  user, which defeats the shared store. RHEL8's kernel can't do rootless
-  overlay at all, so podman already uses fuse-overlayfs there. The setting
+  inside a rootless container. Without that setting, podman tries to make
+  each user a private, re-owned copy of the whole image on first start. On
+  RHEL8 that fails, so no container starts (`creating container storage:
+  error during chown: storage-chown-by-maps: lchown ...: operation not
+  permitted`); on RHEL9 and later it works but takes minutes and several
+  GB per user, which defeats the shared store. The setting
   in `storage.conf` also applies to root's own podman, which is a little
   slower through fuse-overlayfs but otherwise unaffected.
+- **`force_mask = "shared"`** is how the store keeps each file's real
+  owner and mode. The installer loads the image into the store with it:
+  every file is stored as root-owned and readable,
+  with the real owner and mode (setuid bits included) in an extended
+  attribute that fuse-overlayfs shows inside the container. Without it,
+  a rootless user sees the store's root-owned files as owned by `nobody`,
+  and `sudo` inside the container fails. Only loading needs the option;
+  it isn't set in `storage.conf`. If the installer finds a store made
+  without it (by an older installer), it empties the store and loads the
+  image again. Needs podman 4.0 or later (RHEL 8.6+).
 - **Users' own `~/.config/containers/storage.conf`** replaces the system
   file, because podman doesn't merge them. Anyone listed in step 6 must add
   the store to `additionalimagestores` (and the same `mount_program`) in

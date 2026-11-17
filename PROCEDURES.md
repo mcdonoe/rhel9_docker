@@ -187,7 +187,8 @@ damaged copy is caught before anything is installed.
 
 ### E1. Prerequisites (once per machine, as root)
 
-- `dnf install podman`, and on RHEL9 or newer also `dnf install fuse-overlayfs`.
+- `dnf install podman fuse-overlayfs` (on RHEL8, fuse-overlayfs usually
+  comes with podman). The installer needs it on every RHEL version.
 - Every user who'll use the container has `/etc/subuid` and `/etc/subgid`
   entries (`grep "^$USER:" /etc/subuid /etc/subgid`; add with
   `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>`).
@@ -215,6 +216,32 @@ It checks your setup and tells you exactly what to fix if anything's wrong.
 
 **Check:** `--check` ends with everything OK, and `rhel9-dev` opens a shell
 in your repo folder within a few seconds.
+
+### E4. If `rhel9-dev` won't start, or `--check` reports a problem
+
+Run these as the user it fails for, and compare with what's expected:
+
+```
+grep "^$USER:" /etc/subuid /etc/subgid        # one line from each file
+podman info --format '{{.Store.GraphDriverName}} {{json .Store.GraphOptions}}'
+                                              # overlay, with overlay.mount_program
+                                              #   = /usr/bin/fuse-overlayfs
+grep -A3 additionalimagestores /etc/containers/storage.conf
+ls ~/.config/containers/storage.conf          # should not exist (it would replace
+                                              #   the system file)
+```
+
+- **No `fuse-overlayfs` in `podman info`, or `--check` says `sudo doesn't
+  work inside`:** the store was set up by an older installer. Re-run the
+  current `install-shared.sh` as root. It sets `mount_program` in
+  `/etc/containers/storage.conf`, and if the store was loaded without
+  `force_mask` it empties it and loads the image again (everyone must be
+  out of `rhel9-dev` first). To run just the new script from an older
+  unpacked package: copy it in over the old one and add `--skip-checksums`.
+- **No subuid/subgid line:** add them as in E1, then run
+  `podman system migrate` as that user.
+- **After changing either,** run `podman system migrate` as the user, then
+  `rhel9-dev --check`.
 
 ---
 
@@ -434,6 +461,8 @@ every project's `@playwright/test` to match at the same time.
 
 | You see | Cause | Fix |
 | --- | --- | --- |
+| `creating container storage: error during chown: storage-chown-by-maps: lchown ...: operation not permitted` when starting `rhel9-dev` | podman isn't using fuse-overlayfs with the shared store (installers before Nov 2026 didn't set it on RHEL8), and/or the image has files owned by the build user (images before Nov 2026: `/opt/omp`) | Install a current package with `./install-shared.sh` (it sets `mount_program`), then `rhel9-dev --check`. See [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
+| `--check`: `PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)` | The shared store was loaded without `force_mask = "shared"`, so rootless users see its root-owned files (`/usr/bin/sudo` included) as owned by nobody | Re-run the current `install-shared.sh` as root; see [E4](#e4-if-rhel9-dev-wont-start-or---check-reports-a-problem) |
 | `can't read maps/ (SELinux? ...)` during a build | The engine was run by hand without `--security-opt label=disable` | Build with `./build.sh` |
 | `404` from `pnpm install` / `pnpm add` | The package (or that version) isn't vendored | Use a vendored version, or add it (H3). On a connected machine you can use `npm_config_registry=https://registry.npmjs.org/ ./run.sh ...` |
 | omp_distro's build fails fetching npm packages | It needs the public registry, not the vendored one | Prefix with `npm_config_registry=https://registry.npmjs.org/` (C1) |

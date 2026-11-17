@@ -3,7 +3,7 @@
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
 gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
 OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium,
-Firefox), Boost 1.81, uv, vim, btop,
+Firefox), Boost 1.81, Protocol Buffers 3.15.6 (protoc + C++), uv, vim, btop,
 the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
 plus an opt-in dnsmasq DHCP server (see below).
 
@@ -252,6 +252,17 @@ else without touching systemd, to review it first.
   `-lboost_<lib>` work without `-I` or `-L` flags. In CMake, use
   `find_package(Boost 1.81 CONFIG REQUIRED COMPONENTS ...)`. Boost.Python
   and Boost.MPI aren't built.
+- **Protocol Buffers 3.15.6**: `protoc` and the C++ runtime, built from
+  the official `protobuf-cpp` source release (checksum-pinned via
+  `PROTOBUF_VERSION`/`PROTOBUF_SHA256`) with gcc-toolset-12, into
+  `/usr/local` like Boost. `protoc --version` says `libprotoc 3.15.6`;
+  `pkg-config --cflags --libs protobuf` works (the image sets
+  `PKG_CONFIG_PATH`), and so does CMake's `find_package(Protobuf)`.
+  `protoc` generates code for every language, but the runtimes for other
+  languages come from the project, at a matching 3.15.x version (e.g.
+  `com.google.protobuf:protobuf-java:3.15.6` in the project's Maven
+  repository). This is separate from projects that bring their own protoc
+  through Maven or buf, such as `web_test` (protobuf 4.x).
 - **Web development**: Node.js 22 with npm, pnpm, Maven 3.9 and the JDK's
   `jmods` (for `jlink`/`jpackage`), matching the toolchain in the
   air-gapped build tooling guide:

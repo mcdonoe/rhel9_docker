@@ -65,10 +65,12 @@
 #      entrypoint needs to read /etc/shadow from it to create your user)
 #   3. labels the store for SELinux like podman's own storage
 #   4. adds the store to /etc/containers/storage.conf's
-#      additionalimagestores, and on kernels newer than RHEL8's sets
+#      additionalimagestores, and sets
 #      mount_program = fuse-overlayfs, which lets rootless podman use the
-#      store's root-owned files without making each user a private copy of
-#      the image. Backs storage.conf up first.
+#      store's root-owned files, as root, without making each user a private
+#      copy of the image (the store itself is loaded with force_mask=shared,
+#      which records each file's owner and mode for fuse-overlayfs). Backs
+#      storage.conf up first.
 #   5. installs the scripts to PREFIX and links BINDIR/rhel9-dev to run.sh
 #   6. lists users whose own ~/.config/containers/storage.conf would hide
 #      the shared store from them
@@ -436,19 +438,38 @@ fi
 # Podman for the store itself, ignoring storage.conf's options: the store is
 # also listed there as an additional store, and opening one store both ways
 # at once can deadlock on its lock files.
+#
+# force_mask=shared stores every file as root-owned 0755 and keeps its real
+# owner and mode (setuid bits included) in a user.containers.override_stat
+# xattr, which fuse-overlayfs shows inside users' containers. Without it,
+# rootless users see the store's root-owned files as owned by nobody, so
+# sudo and anything else that checks ownership breaks. It needs
+# fuse-overlayfs, so --no-fuse-overlayfs leaves both out.
+#
+# Any --storage-opt replaces all of storage.conf's options (the additional
+# stores included); "" alone means none, and can't be combined with others.
 store_podman() {
+    local opts=(--storage-opt "")
+    if [[ "${USE_FUSE:-1}" != 0 ]]; then
+        opts=(--storage-opt overlay.mount_program=/usr/bin/fuse-overlayfs
+              --storage-opt overlay.force_mask=shared)
+    fi
     podman --root "$STORE" --runroot /run/rhel9-dev-shared-store \
-        --storage-driver overlay --storage-opt "" "$@"
+        --storage-driver overlay "${opts[@]}" "$@"
+}
+
+# Is the store in use by a running container? Rootless containers live in
+# each user's own storage, so the store can't tell; look for mounts of it.
+store_in_use() {
+    grep -qF "$STORE/" <<<"$(pgrep -af fuse-overlayfs || true)" \
+        || grep -qF "$STORE/overlay" /proc/[0-9]*/mountinfo 2>/dev/null
 }
 
 if [[ "$PRUNE" -eq 1 ]]; then
     [[ -d "$STORE/overlay-images" ]] || die "$STORE is not an image store"
     OLD="$(store_podman images --filter dangling=true --format '{{.ID}}  created {{.CreatedSince}}')"
     [[ -n "$OLD" ]] || { echo "Nothing to prune in $STORE."; exit 0; }
-    # Rootless containers live in each user's own storage, so the shared store
-    # can't tell that they use its layers. Look for mounts of it instead.
-    if grep -qF "$STORE/" <<<"$(pgrep -af fuse-overlayfs || true)" \
-            || grep -qF "$STORE/overlay" /proc/[0-9]*/mountinfo 2>/dev/null; then
+    if store_in_use; then
         die "a container is using $STORE right now; try again when nobody is in one"
     fi
     echo "$OLD"
@@ -464,12 +485,12 @@ PY="$(command -v python3 || true)"
 [[ -n "$PY" ]] || PY=/usr/libexec/platform-python      # RHEL8 without python3
 [[ -x "$PY" ]] || die "no python3 (or RHEL8's /usr/libexec/platform-python) to edit storage.conf with"
 
-# Native overlay in a user namespace needs kernel 5.13+; RHEL8's 4.18 falls
-# back to fuse-overlayfs on its own, so only newer kernels need telling.
-if [[ "$USE_FUSE" == auto ]]; then
-    IFS=. read -r kmaj kmin _ <<<"$(uname -r)"
-    if (( kmaj > 5 || (kmaj == 5 && kmin >= 13) )); then USE_FUSE=1; else USE_FUSE=0; fi
-fi
+# Rootless podman must use fuse-overlayfs with the shared store, on every
+# kernel: it's what shows the store's root-owned files as root inside a
+# user's container. Without it, podman tries to make each user a re-owned
+# copy of the image, which on RHEL8 fails outright ("storage-chown-by-maps:
+# lchown ...: operation not permitted") and elsewhere costs minutes and GBs.
+[[ "$USE_FUSE" == auto ]] && USE_FUSE=1
 if [[ "$USE_FUSE" -eq 1 && ! -x /usr/bin/fuse-overlayfs ]]; then
     die "/usr/bin/fuse-overlayfs is missing. Install the fuse-overlayfs package
        (from this host's RHEL repos or install media), then re-run. Or re-run
@@ -482,6 +503,23 @@ if [[ "$CHECKSUMS" -eq 1 ]]; then
     step "Checking the package against SHA256SUMS"
     (cd "$HERE" && sha256sum -c --quiet SHA256SUMS) || die "checksum mismatch; copy the package again"
     echo "OK"
+fi
+
+# ---------------------------------------------------------------------------
+# A store made by an older installer has no override_stat xattrs (users see
+# its files as owned by nobody, so sudo fails). A layer already in the store
+# is reused as it is, so loading again wouldn't fix it: empty the store first.
+if [[ "$USE_FUSE" -eq 1 && -d "$STORE/overlay" ]] && ! "$PY" - "$STORE" <<'EOF_PY'
+import glob, os, sys
+files = glob.glob(os.path.join(sys.argv[1], "overlay", "*", "diff", "usr", "bin", "sudo"))
+sys.exit(0 if all("user.containers.override_stat" in os.listxattr(f, follow_symlinks=False)
+                  for f in files) else 1)
+EOF_PY
+then
+    step "Emptying $STORE: it was made without force_mask (files show as nobody)"
+    store_in_use && die "a container is using $STORE right now; try again when nobody is in one"
+    store_podman system reset --force
+    echo "Emptied; the image is loaded again below."
 fi
 
 # ---------------------------------------------------------------------------
@@ -577,13 +615,17 @@ else:
 
 # mount_program
 if use_fuse:
-    s, e = ensure_section("storage.options.overlay")
-    i = find_key("mount_program", s, e)
-    want = 'mount_program = "/usr/bin/fuse-overlayfs"'
-    if i is None:
-        lines[s + 1:s + 1] = [want]
-    elif lines[i].strip() != want:
-        lines[i] = want
+    ensure_section("storage.options.overlay")
+    # Only mount_program: users' fuse-overlayfs reads the store's
+    # override_stat xattrs without force_mask set on their side, and podman
+    # before 4.0 (RHEL 8.5 and older) rejects a force_mask it doesn't know.
+    for key, want in (("mount_program", 'mount_program = "/usr/bin/fuse-overlayfs"'),):
+        s, e = section_bounds("storage.options.overlay")
+        i = find_key(key, s, e)
+        if i is None:
+            lines[s + 1:s + 1] = [want]
+        elif lines[i].strip() != want:
+            lines[i] = want
 
 sys.stdout.write("\n".join(lines))
 EOF_PY

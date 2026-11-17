@@ -115,7 +115,7 @@ resolve_workspace() {
 # --check: is the image the shared store's copy, and does a container start
 # quickly as you? Exits non-zero if something needs fixing.
 check() {
-    local problems=0 rw ro t0 secs out kmaj kmin
+    local problems=0 rw ro t0 secs out
     echo "engine: $ENGINE ($([[ "$ENGINE_ROOTLESS" -eq 1 ]] && echo rootless || echo rootful))"
     if [[ "$ENGINE_IS_PODMAN" -eq 1 ]]; then
         local list
@@ -136,15 +136,16 @@ check() {
             echo "  If this machine has a shared store, a ~/.config/containers/storage.conf"
             echo "  of yours may be replacing the system one (see INSTALL.md)."
         fi
-        # Rootless native overlay (kernel 5.13+) can't remap the store's
-        # root-owned files, so podman would make you a private, re-owned copy
-        # of the whole image on first start. fuse-overlayfs remaps instead.
-        IFS=. read -r kmaj kmin _ <<<"$(uname -r)"
-        if [[ -n "$ro" && "$ENGINE_ROOTLESS" -eq 1 ]] && (( kmaj > 5 || (kmaj == 5 && kmin >= 13) )) \
+        # Without fuse-overlayfs, rootless podman can't show the store's
+        # root-owned files as root, so it tries to make you a private,
+        # re-owned copy of the whole image: slow on RHEL9+, and on RHEL8 it
+        # fails ("storage-chown-by-maps ... operation not permitted").
+        if [[ -n "$ro" && "$ENGINE_ROOTLESS" -eq 1 ]] \
                 && ! grep -q fuse-overlayfs <<<"$("$ENGINE" info --format '{{json .Store.GraphOptions}}')"; then
-            echo "PROBLEM: podman isn't using fuse-overlayfs, so it makes you a private"
-            echo "  multi-GB copy of the shared image. Set mount_program = \"/usr/bin/fuse-overlayfs\""
-            echo "  under [storage.options.overlay] in storage.conf (see INSTALL.md)."
+            echo "PROBLEM: podman isn't using fuse-overlayfs, so it can't use the shared"
+            echo "  image as is (RHEL8: containers fail to start; newer: a private copy)."
+            echo "  An admin re-runs the current install-shared.sh, which sets mount_program"
+            echo "  in /etc/containers/storage.conf (see INSTALL.md)."
             problems=1
         fi
     else
@@ -172,7 +173,10 @@ check() {
     fi
     if [[ "$(id -u)" -ne 0 ]]; then
         grep -qx sudo=ok <<<"$out" && echo "ok: sudo works inside" \
-            || { echo "PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)"; problems=1; }
+            || { echo "PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)."
+                 echo "  If the image is in a shared store, it was probably loaded without"
+                 echo "  force_mask: an admin re-runs the current install-shared.sh (INSTALL.md)."
+                 problems=1; }
     fi
     if (( secs > 30 )); then
         echo "PROBLEM: the container took ${secs}s to start. Podman was probably making"

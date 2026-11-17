@@ -50,6 +50,14 @@ command -v pigz >/dev/null && GZIP_CMD=pigz
 echo "==> Saving $IMAGE_NAME (this takes a few minutes)"
 "$ENGINE" save "$IMAGE_NAME" | "$GZIP_CMD" > "$PKG/$IMAGE_TAR"
 
+# The image's config digest, which is what podman calls its ID (and what
+# install-shared.sh compares against). Docker may report another digest as
+# its ID, so read it from the archive actually saved: docker and podman both
+# write a manifest.json naming the config ("<hex>.json" or "blobs/sha256/<hex>").
+CONFIG_ID="$("$GZIP_CMD" -dc "$PKG/$IMAGE_TAR" | tar -xOf - manifest.json 2>/dev/null \
+    | grep -o '"Config":"[^"]*"' | grep -oE '[0-9a-f]{64}' | head -1 || true)"
+[[ -n "$CONFIG_ID" ]] || echo "warning: couldn't read the image's config digest from $IMAGE_TAR" >&2
+
 # Only what using the image needs; building it is this repo's job.
 # run-dhcp.sh stays in the repo: deployed copies are for development, not
 # DHCP. The runtime package needs only the installer, which also writes
@@ -65,7 +73,8 @@ for f in "${SCRIPTS[@]}"; do cp "$HERE/$f" "$PKG/"; done
 cp "$HERE/README.md" "$PKG/"
 
 {
-    echo "image:      $IMAGE_NAME $("$ENGINE" image inspect "$IMAGE_NAME" --format '{{.Id}}')"
+    echo "image:      $IMAGE_NAME ${CONFIG_ID:+sha256:$CONFIG_ID}"
+    echo "engine id:  $ENGINE $("$ENGINE" image inspect "$IMAGE_NAME" --format '{{.Id}}')"
     echo "packaged:   $(date -Iseconds)"
     echo "repo:       $(git -C "$HERE" rev-parse --short HEAD)$(git -C "$HERE" diff --quiet HEAD -- "${SCRIPTS[@]}" run-app.sh Dockerfile || echo ' (modified)')"
     if [[ "$RUNTIME" -eq 1 ]]; then

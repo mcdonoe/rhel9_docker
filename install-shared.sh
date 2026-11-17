@@ -553,6 +553,9 @@ mkdir -p "$STORE"
 chmod 755 "$STORE"
 set_load_tmpdir "$IMAGE_TAR"
 store_podman load -i "$IMAGE_TAR"
+# Before the repair below, so that whatever happens there, users can read it.
+chmod -R a+rX "$STORE"
+echo "Made $STORE world-readable."
 
 # force_mask's xattrs, as podman 4.x (RHEL 8) writes them, don't work: it
 # drops the setuid, setgid and sticky bits (sudo 4111 is recorded as 0111,
@@ -562,9 +565,11 @@ store_podman load -i "$IMAGE_TAR"
 # sudo broken. Rewrite them from the real owners and modes in the image's
 # layer tars (matched to the store's layers by diff digest). Also repairs
 # layers an earlier install loaded; changes nothing where they're right.
+# A failure here doesn't stop the install: the store still works, only sudo
+# and /tmp inside containers don't (rhel9-dev --check says so).
 if [[ "$USE_FUSE" -eq 1 ]]; then
     step "Repairing the store's owner/mode xattrs (podman 4.x drops setuid bits)"
-    "$PY" - "$STORE" "$IMAGE_TAR" <<'EOF_PY' || die "couldn't repair the xattrs in $STORE"
+    "$PY" - "$STORE" "$IMAGE_TAR" <<'EOF_PY' || REPAIR_FAILED=1
 import gzip, hashlib, json, os, stat, sys, tarfile
 
 XATTR = "user.containers.override_stat"
@@ -580,12 +585,43 @@ class HashingReader:
         self.h.update(b)
         return b
 
+    def drain(self):
+        while self.read(1 << 20):
+            pass
+        return "sha256:" + self.h.hexdigest()
+
+
+class Prefixed:
+    """Gives back bytes already read from f, then the rest of f."""
+    def __init__(self, prefix, f):
+        self.p, self.f = prefix, f
+
+    def read(self, n=-1):
+        if not self.p:
+            return self.f.read(n)
+        if n is None or n < 0:
+            b, self.p = self.p + self.f.read(), b""
+            return b
+        b, self.p = self.p[:n], self.p[n:]
+        return b + self.f.read(n - len(b)) if len(b) < n else b
+
 
 def read_layer(stream):
-    """{path in layer: (uid, gid, mode)} and the diff digest of a layer tar."""
-    hr = HashingReader(stream)
+    """{path in layer: (uid, gid, mode)} and the digests it may be known by
+    in the store (uncompressed, and as stored in the archive). Layers can be
+    plain or gzip-compressed tars (docker-archive, OCI layout, docker 25+)."""
+    raw = HashingReader(stream)
+    head = raw.read(4)
+    src = Prefixed(head, raw)
+    if head[:2] == b"\x1f\x8b":
+        src = gzip.GzipFile(fileobj=src, mode="rb")
+    elif head == b"\x28\xb5\x2f\xfd":
+        sys.stderr.write("warning: a zstd-compressed layer, which this can't read; skipped\n")
+        raw.drain()
+        return None, ()
+    plain = HashingReader(src)
     entries = {}
-    with tarfile.open(fileobj=hr, mode="r|") as t:
+    with tarfile.open(fileobj=plain, mode="r|") as t:
         for m in t:
             name = os.path.normpath(m.name).lstrip("/")
             name = "" if name == "." else name
@@ -597,9 +633,7 @@ def read_layer(stream):
                     entries[name] = entries[target]
                 continue
             entries[name] = (m.uid, m.gid, m.mode & 0o7777)
-    while hr.read(1 << 20):
-        pass
-    return entries, "sha256:" + hr.h.hexdigest()
+    return entries, (plain.drain(), raw.drain())
 
 
 def fix_layer(diff, entries):
@@ -626,27 +660,43 @@ def fix_layer(diff, entries):
 
 
 with open(os.path.join(store, "overlay-layers", "layers.json")) as f:
-    layer_ids = {l["diff-digest"]: l["id"] for l in json.load(f) if l.get("diff-digest")}
-layers = fixed = 0
+    layer_ids = {}
+    for l in json.load(f):
+        for key in ("diff-digest", "compressed-diff-digest"):
+            if l.get(key):
+                layer_ids[l[key]] = l["id"]
+done, tried = set(), 0
+fixed = 0
 opener = gzip.open if archive.endswith(".gz") else open
 with opener(archive, "rb") as raw, tarfile.open(fileobj=raw, mode="r|") as outer:
     for m in outer:
-        if not (m.isfile() and m.name.endswith(".tar")):
+        # Every file could be a layer, whatever it's called (<id>/layer.tar,
+        # <digest>.tar, blobs/sha256/<digest>); configs and manifests aren't
+        # tars and are skipped.
+        if not m.isfile():
             continue
         try:
-            entries, digest = read_layer(outer.extractfile(m))
-        except tarfile.TarError:
-            continue                    # not an uncompressed layer tar
-        if digest in layer_ids:
-            fixed += fix_layer(os.path.join(store, "overlay", layer_ids[digest], "diff"), entries)
-            layers += 1
+            entries, digests = read_layer(outer.extractfile(m))
+        except (tarfile.TarError, OSError, EOFError):
+            continue
+        if entries is None:
+            continue
+        tried += 1
+        lid = next((layer_ids[d] for d in digests if d in layer_ids), None)
+        if lid is None or lid in done:
+            continue
+        fixed += fix_layer(os.path.join(store, "overlay", lid, "diff"), entries)
+        done.add(lid)
+layers = len(done)
 if layers == 0:
-    sys.exit("none of the image's layers were found in " + store)
+    sys.exit("found %d layer tars in %s, but none of them in %s" % (tried, archive, store))
 print("Checked %d layers; fixed %d xattrs." % (layers, fixed))
 EOF_PY
+    if [[ "${REPAIR_FAILED:-0}" -eq 1 ]]; then
+        echo "warning: couldn't repair the xattrs in $STORE (see above). The install" >&2
+        echo "  goes on, but on RHEL 8 sudo and /tmp won't work inside containers." >&2
+    fi
 fi
-chmod -R a+rX "$STORE"
-echo "Made $STORE world-readable."
 
 WANT_ID="$(sed -n 's/^image: *[^ ]* \(sha256:\)\{0,1\}\([0-9a-f]*\).*/\2/p' "$HERE/PACKAGE-INFO" 2>/dev/null || true)"
 GOT_ID="$(store_podman image inspect "$IMAGE_NAME" --format '{{.Id}}')"

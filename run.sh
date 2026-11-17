@@ -161,7 +161,7 @@ check() {
     fi
     echo "starting a test container..."
     t0=$SECONDS
-    if ! out="$("$ENGINE" "${args[@]}" "$IMAGE_NAME" bash -lc 'echo "uid=$(id -u)"; sudo -n true 2>/dev/null && echo sudo=ok; g++ --version | head -1' 2>&1)"; then
+    if ! out="$("$ENGINE" "${args[@]}" "$IMAGE_NAME" bash -lc 'echo "uid=$(id -u)"; sudo -n true 2>/dev/null && echo sudo=ok; echo "sudostat=$(stat -c "%a %u" /usr/bin/sudo)"; g++ --version | head -1' 2>&1)"; then
         echo "PROBLEM: the container failed:"; echo "$out" | sed 's/^/  /'
         return 1
     fi
@@ -173,9 +173,20 @@ check() {
     fi
     if [[ "$(id -u)" -ne 0 ]]; then
         grep -qx sudo=ok <<<"$out" && echo "ok: sudo works inside" \
-            || { echo "PROBLEM: sudo doesn't work inside (files in the image may show as owned by nobody)."
-                 echo "  If the image is in a shared store, it was probably loaded without"
-                 echo "  force_mask: an admin re-runs the current install-shared.sh (INSTALL.md)."
+            || { echo "PROBLEM: sudo doesn't work inside ($(sed -n 's/^sudostat=//p' <<<"$out" | awk '{print "/usr/bin/sudo is mode "$1", owner uid "$2}'))."
+                 # The store is loaded with force_mask=shared: every file is
+                 # 0755 on disk, its real owner and mode in an override_stat
+                 # xattr that fuse-overlayfs must apply. sudo showing 755 means
+                 # that xattr isn't being applied (so /tmp is 755 too); 4755
+                 # owned by nobody means the store predates force_mask.
+                 if grep -q '^sudostat=755 ' <<<"$out"; then
+                     echo "  The store was loaded with force_mask, but this host's fuse-overlayfs"
+                     echo "  isn't applying its owner/mode xattrs (so /tmp is 0755 too)."
+                     echo "  Report this host's: rpm -q fuse-overlayfs podman containers-common"
+                 else
+                     echo "  If the image is in a shared store, it was probably loaded without"
+                     echo "  force_mask: an admin re-runs the current install-shared.sh (INSTALL.md)."
+                 fi
                  problems=1; }
     fi
     if (( secs > 30 )); then

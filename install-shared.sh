@@ -473,14 +473,21 @@ fi
 #
 # Any --storage-opt replaces all of storage.conf's options (the additional
 # stores included); "" alone means none, and can't be combined with others.
+#
+# Podman writes the store's metadata (images.json, layers.json, lock files)
+# readable by root only, on any command (load, prune, even inspect), and
+# every user's podman reads the store as that user. So after each command,
+# make the whole store readable again; it takes well under a second.
 store_podman() {
-    local opts=(--storage-opt "")
+    local opts=(--storage-opt "") rc=0
     if [[ "${USE_FUSE:-1}" != 0 ]]; then
         opts=(--storage-opt overlay.mount_program=/usr/bin/fuse-overlayfs
               --storage-opt overlay.force_mask=shared)
     fi
     podman --root "$STORE" --runroot /run/rhel9-dev-shared-store \
-        --storage-driver overlay "${opts[@]}" "$@"
+        --storage-driver overlay "${opts[@]}" "$@" || rc=$?
+    [[ ! -d "$STORE" ]] || chmod -R a+rX "$STORE"
+    return "$rc"
 }
 
 # Is the store in use by a running container? Rootless containers live in
@@ -553,8 +560,6 @@ mkdir -p "$STORE"
 chmod 755 "$STORE"
 set_load_tmpdir "$IMAGE_TAR"
 store_podman load -i "$IMAGE_TAR"
-# Before the repair below, so that whatever happens there, users can read it.
-chmod -R a+rX "$STORE"
 echo "Made $STORE world-readable."
 
 # force_mask's xattrs, as podman 4.x (RHEL 8) writes them, don't work: it

@@ -1,0 +1,15 @@
+// Compiled by the image build through protobuf-maven-plugin with the
+// vendored protoc, then built against the vendored protobuf-java: proof that
+// the whole chain resolves from /opt/maven-repo alone.
+syntax = "proto3";
+
+package rhel9dev.vendor;
+
+option java_package = "rhel9dev.vendor";
+option java_multiple_files = true;
+
+message SelfTest {
+  string name = 1;
+  repeated int64 values = 2;
+  map<string, string> tags = 3;
+}

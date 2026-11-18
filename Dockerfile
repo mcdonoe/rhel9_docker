@@ -77,7 +77,7 @@ ENTRYPOINT ["/usr/local/bin/run-app"]
 # ---------------------------------------------------------------------------
 FROM redhat/ubi9 AS dev
 
-LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium, Firefox), Boost 1.81, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
+LABEL description="RHEL9 UBI dev environment: gcc-toolset 12/14/15, Python 3.11/3.12/3.14, Go + gopls/delve, OpenJDK 21 + Ant + Maven 3.9 (+ vendored Maven repo), Node.js 22 + pnpm, buf, Playwright (Chromium, Firefox), Boost 1.81, cmake/make, btop, vim, opt-in dnsmasq DHCP server, optional OMP coding agent"
 
 # ---------------------------------------------------------------------------
 # Container-engine neutrality (podman vs docker).
@@ -624,6 +624,45 @@ RUN set -eux; \
         for (const [n, v] of Object.entries(p.devDependencies)) process.stdout.write(`${n}@${v} `);'); \
     kill "$REGISTRY_PID"; \
     cd /; rm -rf /tmp/selftest /tmp/selftest-store /tmp/selftest-cache /tmp/registry-port
+
+# ---------------------------------------------------------------------------
+# Vendored Maven artifacts, for development with no Maven repository
+# (air-gapped): protobuf-java 4.36 and protoc 4.36 (linux-x86_64 exe), the
+# xolstice protobuf-maven-plugin with os-maven-plugin, maven-antrun-plugin
+# 3.1.0 with its Ant libraries, Maven's default jar-lifecycle plugins, and
+# everything they need.
+#
+# maven-vendor/pom.xml is a project that uses all of them. build-repo.sh
+# builds it online, keeps what Maven downloaded as a plain read-only Maven
+# repository in /opt/maven-repo, checks every file against the SHA-256s
+# pinned in maven-vendor/checksums.sha256, and builds the project again
+# from /opt/maven-repo alone, so a build that succeeds is known to resolve
+# everything offline. The image's global settings.xml puts /opt/maven-repo
+# ahead of Maven Central for every project. See maven-vendor/README.md.
+# ---------------------------------------------------------------------------
+COPY maven-vendor/ /opt/maven-vendor/
+RUN set -eux; \
+    /opt/maven-vendor/build-repo.sh /opt/maven-vendor /opt/maven-repo; \
+    install -m 644 /opt/maven-vendor/settings.xml /etc/maven/settings.xml; \
+    chmod -R a+rX /opt/maven-vendor; \
+    rm -rf /root/.m2
+
+# ---------------------------------------------------------------------------
+# buf — the Protobuf CLI (lint, breaking-change checks, generate), the
+# official standalone binary, checksum pinned (sha256.txt in each GitHub
+# release). Same version as the vendored @bufbuild/buf npm package, so
+# `buf` and `pnpm exec buf` agree. Bump BUF_VERSION/BUF_SHA256 together.
+# ---------------------------------------------------------------------------
+ARG BUF_VERSION=1.75.0
+ARG BUF_SHA256=fad1e38d6909bbb583a4da81d8c02a01046e2cd663bde7e337dd24277393764b
+
+RUN set -eux; \
+    curl -fsSL -o /tmp/buf \
+        "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64"; \
+    echo "${BUF_SHA256}  /tmp/buf" | sha256sum -c -; \
+    install -m 755 /tmp/buf /usr/local/bin/buf; \
+    rm /tmp/buf; \
+    [ "$(buf --version)" = "${BUF_VERSION}" ]
 
 # ---------------------------------------------------------------------------
 # Maps: the offline map data from the maps stage, in /opt/maps, plus

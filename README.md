@@ -2,8 +2,8 @@
 
 A persistent RHEL9 (UBI9) development image: git, cmake, make, autotools,
 gcc-toolset 12, 14 & 15, Python 3.11, 3.12 & 3.14, Go (+ gopls, delve),
-OpenJDK 21 + Ant + Maven 3.9, Node.js 22 + pnpm, Playwright (Chromium,
-Firefox), Boost 1.81, Protocol Buffers 3.15.6 (protoc + C++), Eigen 3.4,
+OpenJDK 21 + Ant + Maven 3.9 (with vendored protobuf 4.36 artifacts), Node.js 22
++ pnpm, buf, Playwright (Chromium, Firefox), Boost 1.81, Protocol Buffers 3.15.6 (protoc + C++), Eigen 3.4,
 ZeroMQ 4.3 + CZMQ 4.2, OpenSSL 3, zlib and log4cxx 1.x (all with headers),
 CUDA 12.2 (nvcc + the common libraries), uv, vim, btop,
 the OMP coding agent from an omp_distro bundle (see [OMP](#omp-coding-agent)),
@@ -36,6 +36,7 @@ reference behind it.
 | `dnsmasq/dhcp.conf.example` | Template to copy to `dhcp.conf` (gitignored) |
 | `omp-bundle/` | Where `build.sh` stages the OMP bundle for the build (contents gitignored) |
 | `npm-vendor/` | The vendored npm packages and the offline registry that serves them (see its README) |
+| `maven-vendor/` | The vendored Maven artifacts and the offline repository built from them (see its README) |
 | `fetch-maps.sh` | Downloads the eastern seaboard map tiles into `maps/` for the next build |
 | `maps/` | Where map tiles are staged for the build (contents gitignored) |
 | `.secrets/` | Cached Red Hat credentials (gitignored, created on demand) |
@@ -321,7 +322,16 @@ else without touching systemd, to review it first.
     `-e npm_config_registry=https://registry.npmjs.org/` uses the public
     registry instead.
   - **Maven packages come from the project**, which carries its own
-    repository and points `maven.repo.local` at it; the image adds none.
+    repository and points `maven.repo.local` at it. The image adds what
+    projects' repositories lack, in a read-only Maven repository at
+    `/opt/maven-repo` that the image's `/etc/maven/settings.xml` puts ahead
+    of Central: protobuf-java and protoc (exe) **4.36.2**, the xolstice
+    `protobuf-maven-plugin` 0.6.1 with `os-maven-plugin` 1.7.1, and
+    `maven-antrun-plugin` 3.1.0 with its Ant libraries. What's vendored,
+    and how to add more, is in [maven-vendor/README.md](maven-vendor/README.md).
+  - **buf** (the Protobuf CLI) is the official standalone binary in
+    `/usr/local/bin/buf`, version-pinned (`BUF_VERSION`/`BUF_SHA256`) to
+    the vendored `@bufbuild/buf` npm package's 1.75.0.
 - **Playwright**: vendored, so browser tests need no network. Chromium and
   Firefox are in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`), with
   the RHEL libraries they need, and the build launches both to prove they

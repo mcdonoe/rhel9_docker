@@ -25,7 +25,7 @@ There are two images and two kinds of machine.
 
 | Image | What it's for | Size |
 | --- | --- | --- |
-| `rhel9-dev` | Developing and building: compilers, Java 21 + Maven, Node 22 + pnpm, Playwright browsers, the OMP agent, the offline maps, and a vendored npm registry | ~7 GB |
+| `rhel9-dev` | Developing and building: compilers, Java 21 + Maven, Node 22 + pnpm, buf, Playwright browsers, the OMP agent, the offline maps, a vendored npm registry and a vendored Maven repository | ~7 GB |
 | `rhel9-runtime` | Running a built Java application as a system service: Java 21 runtime and the offline maps, nothing else | ~0.8 GB |
 
 | Machine | What happens there |
@@ -50,8 +50,10 @@ The whole flow:
 
 Because the air-gapped side has no network, **everything is vendored** into
 the images: npm packages, Playwright browsers, map tiles, fonts. Maven
-dependencies are the exception: each project carries its own Maven
-repository (its wrappers set `maven.repo.local`).
+dependencies mostly come from each project's own Maven repository (its
+wrappers set `maven.repo.local`); the image adds a small read-only one,
+`/opt/maven-repo`, for what those lack (protobuf 4.36, its Maven plugins,
+antrun's Ant libraries).
 
 ---
 
@@ -299,8 +301,13 @@ registry. What's available is listed in
 ### F3. Maven
 
 Use your project's own Maven wrappers, which set `maven.repo.local` to the
-project's repository. The image adds no repository of its own. Your
-`~/.m2` is a per-user volume, so it survives between runs.
+project's repository. The image also has a read-only repository,
+`/opt/maven-repo`, which its global `settings.xml` puts ahead of Central:
+protobuf-java and protoc 4.36.2, the xolstice `protobuf-maven-plugin` with
+`os-maven-plugin`, and `maven-antrun-plugin` 3.1.0 with its Ant libraries
+(list and usage: [maven-vendor/README.md](maven-vendor/README.md)). Maven
+copies what it uses from there into your local repository. Your `~/.m2` is
+a per-user volume, so it survives between runs.
 
 ### F4. Playwright browser tests
 

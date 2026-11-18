@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The vendored Maven artifacts, as a project that uses all of them.
+
+  The image build runs `mvn package` on this project online with an empty
+  local repository; everything Maven downloads to do it (dependencies,
+  plugins, their dependencies, parent POMs and BOMs) becomes the read-only
+  Maven repository /opt/maven-repo. Then it builds this project again with
+  every repository mirrored to /opt/maven-repo alone, so a successful image
+  build means all of this resolves offline. See README.md.
+
+  Every plugin, including Maven's default lifecycle plugins, is pinned
+  here: unpinned, their versions would come from whichever Maven 3.9.x RHEL
+  ships, and checksums.sha256 would drift with it.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>rhel9dev.vendor</groupId>
+  <artifactId>maven-vendor-selftest</artifactId>
+  <version>1</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>21</maven.compiler.release>
+
+    <!-- The vendored set. protobuf-java and protoc move together. -->
+    <protobuf.version>4.36.2</protobuf.version>
+    <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
+    <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
+    <maven-antrun-plugin.version>3.1.0</maven-antrun-plugin.version>
+  </properties>
+
+  <dependencies>
+    <!-- com.google.protobuf:protobuf-java (bridge side of the dual pin) -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>${protobuf.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <extensions>
+      <!-- kr.motd.maven:os-maven-plugin: sets ${os.detected.classifier} -->
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>${os-maven-plugin.version}</version>
+      </extension>
+    </extensions>
+
+    <plugins>
+      <!-- org.xolstice protobuf-maven-plugin, running
+           com.google.protobuf:protoc:<version>:exe:linux-x86_64 -->
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>${protobuf-maven-plugin.version}</version>
+        <configuration>
+          <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- maven-antrun-plugin with its Ant libraries (ant, ant-launcher,
+           plexus-utils...), for antrun-driven codegen with the system
+           protoc. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>${maven-antrun-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>antrun-selftest</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <exec executable="protoc" failonerror="true">
+                  <arg value="--version"/>
+                </exec>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Maven's default lifecycle plugins for a jar project, pinned. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.3.1</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.3</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

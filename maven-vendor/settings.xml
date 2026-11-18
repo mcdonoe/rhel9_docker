@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  rhel9-dev's global Maven settings (/etc/maven/settings.xml, which is
+  ${maven.home}/conf/settings.xml). Replaces RHEL's, whose only active
+  content is Maven's standard block on plain-http repositories, kept below.
+
+  Adds the image's vendored Maven repository, /opt/maven-repo (see
+  /opt/maven-vendor/README.md), ahead of Maven Central for dependencies and
+  plugins, so the vendored artifacts resolve with no network. Anything not
+  vendored still goes to Central and its usual failure offline.
+
+  This merges with a user's ~/.m2/settings.xml and with `-s <file>`; only
+  `-gs <file>` replaces it. A user or project setting that mirrors
+  everything (<mirrorOf>*</mirrorOf>) redirects this repository too; add
+  `,!rhel9-dev-vendored` to that mirrorOf to leave it alone.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>maven-default-http-blocker</id>
+      <mirrorOf>external:http:*</mirrorOf>
+      <name>Pseudo repository to mirror external repositories initially using HTTP.</name>
+      <url>http://0.0.0.0/</url>
+      <blocked>true</blocked>
+    </mirror>
+  </mirrors>
+
+  <profiles>
+    <profile>
+      <id>rhel9-dev-vendored</id>
+      <repositories>
+        <repository>
+          <id>rhel9-dev-vendored</id>
+          <name>rhel9-dev vendored artifacts</name>
+          <url>file:///opt/maven-repo</url>
+          <releases><enabled>true</enabled><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>rhel9-dev-vendored</id>
+          <name>rhel9-dev vendored artifacts</name>
+          <url>file:///opt/maven-repo</url>
+          <releases><enabled>true</enabled><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
+
+  <activeProfiles>
+    <activeProfile>rhel9-dev-vendored</activeProfile>
+  </activeProfiles>
+</settings>
